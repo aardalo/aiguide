@@ -1,0 +1,143 @@
+name: E2E Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'feature/**'
+    paths:
+      - 'web/**'
+      - '.github/workflows/e2e-tests.yml'
+      - 'docker-compose.e2e.yml'
+      - 'Dockerfile.e2e'
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'web/**'
+      - '.github/workflows/e2e-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  e2e-tests:
+    name: Run E2E Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: trip_planner
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: trip_planner_db
+          POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          cache-dependency-path: 'web/package-lock.json'
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install Playwright browsers
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate Prisma Client
+        working-directory: web
+        run: npx prisma generate
+
+      - name: Run Prisma migrations
+        working-directory: web
+        env:
+          DATABASE_URL: postgresql://trip_planner:test_password@localhost:5432/trip_planner_db
+        run: npx prisma migrate deploy
+
+      - name: Build Next.js application
+        working-directory: web
+        run: npm run build
+
+      - name: Run E2E tests
+        working-directory: web
+        env:
+          DATABASE_URL: postgresql://trip_planner:test_password@localhost:5432/trip_planner_db
+          CI: 'true'
+          NODE_ENV: production
+        run: npx playwright test
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          retention-days: 7
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: web/test-results/
+          retention-days: 7
+
+      - name: Publish test results
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: |
+            web/test-results/results.json
+          check_name: E2E Test Results
+          compare_to_earlier_commit: false
+        continue-on-error: true
+
+      - name: Comment PR with test results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const testResultsPath = 'web/test-results/results.json';
+            
+            if (!fs.existsSync(testResultsPath)) {
+              console.log('No test results found');
+              return;
+            }
+            
+            const results = JSON.parse(fs.readFileSync(testResultsPath, 'utf8'));
+            const stats = results.stats || {};
+            
+            const summary = `
+            ## 🧪 E2E Test Results
+            
+            - **Passed**: ${stats.expected || 0}
+            - **Failed**: ${stats.unexpected || 0}
+            - **Skipped**: ${stats.skipped || 0}
+            - **Duration**: ${Math.round((stats.duration || 0) / 1000)}s
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: summary
+            });
+        continue-on-error: true

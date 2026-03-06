@@ -1,0 +1,127 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Trip {
+  id                 String             @id @default(cuid())
+  title              String             @db.VarChar(200)
+  description        String?
+  startDate          DateTime           @db.Date
+  stopDate           DateTime           @db.Date
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+  planMode           Boolean            @default(false) @map("plan_mode")
+  routingPreferences String?            @map("routing_preferences")
+  dailyDestinations  DailyDestination[]
+  dailyPois          DailyPoi[]
+  routeSegments      RouteSegment[]
+
+  @@index([createdAt])
+  @@map("trips")
+}
+
+model DailyDestination {
+  id        String   @id @default(cuid())
+  tripId    String   @map("trip_id")
+  dayDate   DateTime @map("day_date") @db.Date
+  name         String   @db.VarChar(200)
+  municipality String?  @db.VarChar(200)
+  latitude     Float?
+  longitude    Float?
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  trip         Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@unique([tripId, dayDate])
+  @@index([tripId])
+  @@index([dayDate])
+  @@map("daily_destinations")
+}
+
+/// One route segment per travel day — the leg from the previous night's
+/// destination to the current night's destination.
+model RouteSegment {
+  id                String          @id @default(cuid())
+  tripId            String          @map("trip_id")
+  /// The date this segment arrives at (day N). Day 1 has no segment.
+  dayDate           DateTime        @map("day_date") @db.Date
+  /// ID of the DailyDestination this segment departs from (day N-1).
+  /// Stored as plain string (not FK) so edits to a destination don't
+  /// cascade-delete the segment — stale segments are upserted on next generation.
+  fromDestinationId String          @map("from_destination_id") @db.VarChar(30)
+  /// ID of the DailyDestination this segment arrives at (day N).
+  toDestinationId   String          @map("to_destination_id") @db.VarChar(30)
+  /// Provider identifier at the time of generation, e.g. "ors", "mapbox".
+  provider          String          @db.VarChar(50)
+  distanceMeters    Float           @map("distance_meters")
+  durationSeconds   Float           @map("duration_seconds")
+  /// Google-encoded polyline for the full route geometry (nullable).
+  encodedPolyline   String?         @map("encoded_polyline")
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  trip              Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  waypoints         RouteWaypoint[]
+
+  @@unique([tripId, dayDate])
+  @@index([tripId])
+  @@map("route_segments")
+}
+
+/// Auto-generated interval waypoints along a route segment, placed near
+/// major intersection turn-points at ~30-minute travel cadence (STORY-006).
+model RouteWaypoint {
+  id                    String       @id @default(cuid())
+  segmentId             String       @map("segment_id")
+  /// 0-based position within the ordered waypoint list for this segment
+  sequenceIndex         Int          @map("sequence_index")
+  latitude              Float
+  longitude             Float
+  /// The 30-minute interval mark this waypoint was generated for (seconds from start)
+  targetDurationSeconds Float        @map("target_duration_seconds")
+  /// Cumulative travel time of the selected turn-point step (seconds from start)
+  actualDurationSeconds Float        @map("actual_duration_seconds")
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  /// True when the user has manually dragged this waypoint to a new position.
+  isManual              Boolean      @default(false) @map("is_manual")
+  segment               RouteSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+
+  @@index([segmentId])
+  @@map("route_waypoints")
+}
+
+/// A user-defined point of interest attached to a specific travel day.
+model DailyPoi {
+  id        String   @id @default(cuid())
+  tripId    String   @map("trip_id")
+  dayDate   DateTime @map("day_date") @db.Date
+  name      String   @db.VarChar(200)
+  latitude  Float
+  longitude Float
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  @@index([tripId])
+  @@index([dayDate])
+  @@map("daily_pois")
+}
+
+/// Generic key-value settings store (server-side only).
+/// Sensitive values (API keys) are never returned verbatim by the settings API.
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique @db.VarChar(100)
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}

@@ -1,0 +1,28 @@
+# Lightweight Dockerfile for running Playwright E2E tests
+# Uses multi-stage build to minimize final image size
+FROM mcr.microsoft.com/playwright:v1.58.2-jammy
+
+# Set working directory
+WORKDIR /app
+
+# Install only production dependencies first (better caching)
+COPY package*.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# Install dev dependencies needed for tests
+RUN npm ci && npm cache clean --force
+
+# Copy application code
+COPY . .
+# Generate Prisma client
+RUN npx prisma generate
+
+
+# Build Next.js (production build is smaller)
+RUN npm run build && rm -rf .next/cache
+
+# Expose port for dev server
+EXPOSE 3000
+
+# Default command runs E2E tests
+CMD ["npm", "run", "test:e2e"]

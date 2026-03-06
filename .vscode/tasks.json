@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run tests",
+      "type": "shell",
+      "command": "bash -lc 'source .venv/bin/activate && pytest'",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Lint",
+      "type": "shell",
+      "command": "bash -lc 'source .venv/bin/activate && ruff check .'",
+      "problemMatcher": []
+    }
+  ]
+}

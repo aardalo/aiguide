@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.env.local
+build/
+dist/
+*.egg-info/
+
+# Web
+web/node_modules/
+web/.next/
+web/.env
+web/.env.local
+
+# Docker
+containerd/
+
+# Claude Code (session data)
+.claude/

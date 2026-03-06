@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: trip_planner_neo4j
+    environment:
+      NEO4J_AUTH: neo4j/trip_planner_neo4j
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - trip_planner_net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: trip_planner_db
+    environment:
+      POSTGRES_USER: trip_user
+      POSTGRES_PASSWORD: trip_password
+      POSTGRES_DB: trip_planner_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trip_user -d trip_planner_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - trip_planner_net
+
+networks:
+  trip_planner_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  neo4j_data:

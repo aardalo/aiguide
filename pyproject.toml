@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-se-starter"
+version = "0.1.0"
+description = "Minimal starter workspace for agentic software engineering"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.8.2",
+  "python-dotenv>=1.0.1",
+  "typer>=0.12.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.11.2",
+  "pytest>=8.3.2",
+  "ruff>=0.6.2",
+]
+
+[project.scripts]
+agentic-se = "agentic_se.cli:app"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentic_se"]

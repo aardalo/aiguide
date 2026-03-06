@@ -1,0 +1,24 @@
+// Prisma data model for Trip entity
+// Location: prisma/schema.prisma
+// Task: TASK-002
+
+model Trip {
+  id          String   @id @default(cuid())
+  title       String   @db.Varchar(200)
+  description String?  @db.Text
+  planMode    Boolean  @default(false) @map("plan_mode")
+  startDate   DateTime @db.Date   // ISO 8601 date-only (YYYY-MM-DD)
+  stopDate    DateTime @db.Date   // ISO 8601 date-only (YYYY-MM-DD)
+  
+  // Metadata
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Indexes for common queries
+  @@index([createdAt])
+  @@map("trips")
+}
+
+// Note: After adding this to schema.prisma, run:
+// npx prisma migrate dev --name add_trip_model
+// npx prisma generate

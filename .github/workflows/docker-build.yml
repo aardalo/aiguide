@@ -1,0 +1,40 @@
+name: Docker Build
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'web/Dockerfile'
+      - 'web/Dockerfile.e2e'
+      - 'web/package.json'
+      - 'web/package-lock.json'
+      - '.github/workflows/docker-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build-e2e-image:
+    name: Build E2E Docker Image
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build E2E Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: web
+          file: web/Dockerfile.e2e
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: trip-planner-e2e:latest
+
+      - name: Verify image builds
+        run: |
+          echo "✓ E2E Docker image successfully built"

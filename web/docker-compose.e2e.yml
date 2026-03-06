@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for tests
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: trip_planner
+      POSTGRES_PASSWORD: dev_password
+      POSTGRES_DB: trip_planner_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trip_planner"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  # E2E test runner
+  e2e-tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    environment:
+      # Database connection
+      DATABASE_URL: postgresql://trip_planner:dev_password@db:5432/trip_planner_db
+      # Next.js settings
+      NODE_ENV: production
+      # Playwright settings
+      CI: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - test-network
+    volumes:
+      # Mount test results and reports
+      - ./playwright-report:/app/playwright-report
+      - ./test-results:/app/test-results
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 2 &&
+        echo 'Running Prisma migrations...' &&
+        npx prisma migrate deploy &&
+        echo 'Starting E2E tests...' &&
+        npm run test:e2e
+      "
+
+networks:
+  test-network:
+    driver: bridge
