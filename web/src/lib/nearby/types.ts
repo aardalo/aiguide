@@ -21,4 +21,6 @@ export interface NearbyPlace {
   iconUrl?: string;
   /** Direct URL to the provider's listing page (e.g. Tripadvisor web_url) */
   webUrl?: string;
+  /** Michelin-style star rating (1-3) for ChatGPT-discovered experiences */
+  michelinStars?: number;
 }

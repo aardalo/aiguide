@@ -385,6 +385,13 @@ select:disabled {
 
 /* Keep form fields readable regardless of OS dark mode */
 
+/* ===== MAP MARKER STYLES ===== */
+
+/* Subtle shadow on app-drawn map icons to distinguish from base-map icons */
+.app-marker-shadow {
+  filter: drop-shadow(0 2px 5px rgba(147, 51, 234, 0.5)) drop-shadow(0 0 3px rgba(147, 51, 234, 0.3));
+}
+
 /* ===== UTILITY CLASSES ===== */
 
 .text-balance {

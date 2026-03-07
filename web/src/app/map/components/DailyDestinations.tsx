@@ -15,6 +15,8 @@ import { decodePolyline } from '@/lib/polyline';
 
 interface DailyDestinationsProps {
   trip: TripResponse;
+  /** Called when the trip itself changes (e.g. stopDate extended by insert-day). */
+  onTripChange?: (trip: TripResponse) => void;
   onUpdate?: () => void;
   /** Called whenever destinations or route segments change so the map can redraw. */
   onRouteData?: (
@@ -41,7 +43,7 @@ interface DailyDestinationsProps {
   initialSelectedDayId?: string | null;
 }
 
-export default function DailyDestinations({ trip, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId }: DailyDestinationsProps) {
+export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId }: DailyDestinationsProps) {
   const [destinations, setDestinations] = useState<DailyDestinationResponse[]>([]);
   const [segments, setSegments] = useState<RouteSegmentResponse[]>([]);
   const [home, setHome] = useState<{ name: string; latitude: number; longitude: number } | null>(null);
@@ -212,6 +214,32 @@ export default function DailyDestinations({ trip, onUpdate, onRouteData, segment
     onUpdate?.();
   };
 
+  // Insert a blank day after the given date
+  const [insertingAfter, setInsertingAfter] = useState<string | null>(null);
+  const handleInsertDay = async (afterDate: string) => {
+    setInsertingAfter(afterDate);
+    try {
+      const res = await fetch(`/api/trips/${trip.id}/insert-day`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ afterDate }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        console.error('[DailyDestinations] Insert day failed:', data.error);
+        return;
+      }
+      const updatedTrip = await res.json();
+      onTripChange?.(updatedTrip);
+      await fetchDestinations();
+      await generateRoutes();
+    } catch (err) {
+      console.error('[DailyDestinations] Insert day error:', err);
+    } finally {
+      setInsertingAfter(null);
+    }
+  };
+
   // Get all dates in the trip range
   const getTripDates = () => {
     const dates: Date[] = [];
@@ -376,15 +404,36 @@ export default function DailyDestinations({ trip, onUpdate, onRouteData, segment
       </div>
 
       {/* Daily destinations list */}
-      <div className="space-y-2">
+      <div className="space-y-0">
         {tripDates.map((date, index) => {
           const destination = getDestinationForDate(date);
           const segment = getSegmentForDate(date);
           const dayPois = getPoisForDate(date);
 
           return (
+            <React.Fragment key={date.toISOString()}>
+              {/* Insert-day hover zone between rows */}
+              {index > 0 && (
+                <div className="group relative h-2 flex items-center justify-center hover:h-8 transition-all cursor-pointer"
+                  onClick={() => {
+                    const prevDate = tripDates[index - 1].toISOString().split('T')[0];
+                    if (!insertingAfter) handleInsertDay(prevDate);
+                  }}
+                >
+                  <div className="absolute inset-x-4 h-px bg-transparent group-hover:bg-primary-300 transition-colors" />
+                  <button
+                    type="button"
+                    disabled={!!insertingAfter}
+                    className="relative z-10 hidden group-hover:flex items-center justify-center w-6 h-6 rounded-full bg-primary-100 hover:bg-primary-200 text-primary-600 text-sm font-bold border border-primary-300 shadow-sm transition-all disabled:opacity-50"
+                    title="Insert a day here"
+                  >
+                    {insertingAfter === tripDates[index - 1].toISOString().split('T')[0] ? (
+                      <span className="inline-block w-3 h-3 border-2 border-primary-600 border-t-transparent rounded-full animate-spin" />
+                    ) : '+'}
+                  </button>
+                </div>
+              )}
             <div
-              key={date.toISOString()}
               className="p-3 bg-neutral-50 rounded-lg border border-neutral-200 hover:bg-neutral-100 transition-colors"
             >
               <div className="flex items-center justify-between">
@@ -487,6 +536,7 @@ export default function DailyDestinations({ trip, onUpdate, onRouteData, segment
                 </div>
               )}
             </div>
+            </React.Fragment>
           );
         })}
       </div>

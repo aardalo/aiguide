@@ -52,6 +52,25 @@ interface TripDetailProps {
   pois?: DailyPoiResponse[];
   /** Pre-selected day destination ID to restore on mount. */
   initialSelectedDayId?: string | null;
+  /** Callback to push a message to the status bar. */
+  onStatusMessage?: (text: string, detail?: string) => void;
+  /** Callback when the trip's date range changes (e.g. after insert-day). */
+  onTripDatesChange?: (startDate: string, stopDate: string) => void;
+  /** Callback when AI Research discovers experiences — used to show markers on map. */
+  onExperiencesDiscovered?: (experiences: Array<{
+    name: string;
+    michelinStars: number;
+    category: string;
+    description: string;
+    reasoning: string;
+    approximateLat: number;
+    approximateLng: number;
+    nearestCity: string;
+    country: string;
+    estimatedDetourKm: number;
+    seasonalNotes?: string;
+    sources?: string[];
+  }>) => void;
 }
 
 export default function TripDetail({
@@ -66,11 +85,24 @@ export default function TripDetail({
   onDaySelect,
   pois,
   initialSelectedDayId,
+  onStatusMessage,
+  onTripDatesChange,
+  onExperiencesDiscovered,
 }: TripDetailProps) {
   const [trip, setTrip] = useState<TripResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isTogglingPlanMode, setIsTogglingPlanMode] = useState(false);
+  const [isResearching, setIsResearching] = useState(false);
+
+  // Notify parent when trip dates change
+  useEffect(() => {
+    if (trip) {
+      const start = typeof trip.startDate === 'string' ? trip.startDate.split('T')[0] : new Date(trip.startDate).toISOString().split('T')[0];
+      const stop = typeof trip.stopDate === 'string' ? trip.stopDate.split('T')[0] : new Date(trip.stopDate).toISOString().split('T')[0];
+      onTripDatesChange?.(start, stop);
+    }
+  }, [trip?.startDate, trip?.stopDate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch trip details from API
   const fetchTripDetails = async (id: string) => {
@@ -131,6 +163,46 @@ export default function TripDetail({
       // Show error but don't clear the trip
     } finally {
       setIsTogglingPlanMode(false);
+    }
+  };
+
+  // Run AI experience discovery for the trip
+  const handleAiResearch = async () => {
+    if (!trip) return;
+    setIsResearching(true);
+    onStatusMessage?.('AI Research: analysing route...');
+    try {
+      const res = await fetch('/api/discover-experiences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tripId: trip.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        onStatusMessage?.(`AI Research failed: ${data.error ?? res.statusText}`, JSON.stringify(data, null, 2));
+        return;
+      }
+      const count = data.experiences?.length ?? 0;
+      const stars3 = data.experiences?.filter((e: { michelinStars: number }) => e.michelinStars === 3).length ?? 0;
+      const stars2 = data.experiences?.filter((e: { michelinStars: number }) => e.michelinStars === 2).length ?? 0;
+      const stars1 = count - stars3 - stars2;
+      const summary = [
+        stars3 > 0 ? `${stars3} must-visit` : '',
+        stars2 > 0 ? `${stars2} worth a detour` : '',
+        stars1 > 0 ? `${stars1} worth a stop` : '',
+      ].filter(Boolean).join(', ');
+      const cachedLabel = data.cached ? ' (cached)' : '';
+      onStatusMessage?.(
+        `AI Research: found ${count} experiences${cachedLabel} — ${summary}`,
+        JSON.stringify(data, null, 2),
+      );
+      if (data.experiences?.length) {
+        onExperiencesDiscovered?.(data.experiences);
+      }
+    } catch (err) {
+      onStatusMessage?.('AI Research failed', String(err));
+    } finally {
+      setIsResearching(false);
     }
   };
 
@@ -398,6 +470,7 @@ export default function TripDetail({
             onDaySelect={onDaySelect}
             pois={pois}
             initialSelectedDayId={initialSelectedDayId}
+            onTripChange={(updatedTrip) => setTrip(updatedTrip)}
             onUpdate={() => {
               if (tripId) fetchTripDetails(tripId);
             }}
@@ -418,6 +491,32 @@ export default function TripDetail({
             <span>Trip ID</span>
             <span className="font-mono">{trip.id}</span>
           </div>
+        </div>
+
+        {/* AI Research */}
+        <div className="mt-6 border-t border-neutral-200 pt-4">
+          <button
+            onClick={handleAiResearch}
+            disabled={isResearching}
+            className="w-full rounded-md bg-info-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-info-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+          >
+            {isResearching ? (
+              <>
+                <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-solid border-white border-r-transparent" />
+                Researching...
+              </>
+            ) : (
+              <>
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                </svg>
+                AI Research
+              </>
+            )}
+          </button>
+          <p className="mt-1.5 text-xs text-neutral-500 text-center">
+            Discover must-see experiences along this route
+          </p>
         </div>
 
         {/* Action buttons */}

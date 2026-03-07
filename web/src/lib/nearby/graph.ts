@@ -97,6 +97,7 @@ export async function searchCachedByBounds(
       if (p.description)  place.description  = p.description as string;
       if (p.webUrl)       place.webUrl       = p.webUrl as string;
       if (p.iconUrl)      place.iconUrl      = p.iconUrl as string;
+      if (p.michelinStars != null) place.michelinStars = typeof p.michelinStars === 'object' ? p.michelinStars.toNumber() : Number(p.michelinStars);
       return place;
     });
   } catch (err) {

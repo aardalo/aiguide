@@ -24,6 +24,8 @@ import NearbySearchModal from './components/NearbySearchModal';
 import TripadvisorSearchModal from './components/TripadvisorSearchModal';
 import FoursquareSearchModal from './components/FoursquareSearchModal';
 import StatusBar, { type StatusBarHandle } from './components/StatusBar';
+import MarkerFilterPane, { type MarkerFilterGroup, type MarkerVisibility } from './components/MarkerFilterPane';
+import PlacePopup from './components/PlacePopup';
 import type { TripResponse, DailyDestinationResponse, DailyPoiResponse } from '@/lib/schemas/trip';
 import type { RouteSegmentResponse, RouteWaypointResponse } from '@/lib/schemas/routing';
 import type { NearbyPlace } from '@/lib/nearby/types';
@@ -48,7 +50,10 @@ const NEARBY_PLACE_EMOJIS: Record<string, string> = {
   park4night:         '🚐',
 };
 
-function makeNearbyMarkerHtml(type: string, provider?: string): string {
+function makeNearbyMarkerHtml(type: string, provider?: string, michelinStars?: number): string {
+  if (provider === 'chatgpt' && michelinStars) {
+    return makeExperienceMarkerHtml(michelinStars);
+  }
   if (provider === 'tripadvisor') {
     return `<div style="width:28px;height:28px;border-radius:50%;background:#ecfdf5;border:1.5px solid #34d399;box-shadow:0 2px 4px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#059669;cursor:pointer;">TA</div>`;
   }
@@ -59,6 +64,34 @@ function makeNearbyMarkerHtml(type: string, provider?: string): string {
   const bg = type === 'park4night' ? '#ecfdf5' : '#fff';
   const border = type === 'park4night' ? '#6ee7b7' : '#d4d4d4';
   return `<div style="width:28px;height:28px;border-radius:50%;background:${bg};border:1.5px solid ${border};box-shadow:0 2px 4px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;">${emoji}</div>`;
+}
+
+// Star-rated marker for AI-discovered experiences (Michelin-style)
+const EXPERIENCE_STAR_COLORS: Record<number, { bg: string; border: string; text: string }> = {
+  3: { bg: '#fef3c7', border: '#f59e0b', text: '#92400e' }, // gold — must-visit
+  2: { bg: '#ede9fe', border: '#8b5cf6', text: '#5b21b6' }, // purple — worth a detour
+  1: { bg: '#e0f2fe', border: '#38bdf8', text: '#0369a1' }, // blue — worth a stop
+};
+
+function makeExperienceMarkerHtml(stars: number): string {
+  const c = EXPERIENCE_STAR_COLORS[stars] ?? EXPERIENCE_STAR_COLORS[1];
+  const starStr = '★'.repeat(stars);
+  return `<div style="display:flex;align-items:center;justify-content:center;min-width:28px;height:28px;border-radius:14px;padding:0 6px;background:${c.bg};border:1.5px solid ${c.border};box-shadow:0 2px 4px rgba(0,0,0,.25);font-size:11px;font-weight:700;color:${c.text};cursor:pointer;white-space:nowrap;">${starStr}</div>`;
+}
+
+interface DiscoveredExperienceMarker {
+  name: string;
+  michelinStars: number;
+  category: string;
+  description: string;
+  reasoning: string;
+  approximateLat: number;
+  approximateLng: number;
+  nearestCity: string;
+  country: string;
+  estimatedDetourKm: number;
+  seasonalNotes?: string;
+  sources?: string[];
 }
 
 /** Haversine distance in metres between two lat/lng points. */
@@ -223,6 +256,8 @@ export default function MapPage() {
   // STORY-007: current route data refs (stable across Leaflet event handlers)
   const currentSegmentsRef = useRef<RouteSegmentResponse[]>([]);
   const currentDestinationsRef = useRef<DailyDestinationResponse[]>([]);
+  // Current trip date range — updated when the selected trip or its dates change
+  const currentTripDatesRef = useRef<{ start: string; stop: string } | null>(null);
   // Ref to the latest handleWaypointMoved function so handleRouteData can
   // reference it without creating a circular useCallback dependency
   const onWaypointMovedRef = useRef<(id: string, lat: number, lng: number) => void>(() => {});
@@ -266,6 +301,17 @@ export default function MapPage() {
   // Foursquare search state
   const [showFoursquareModal, setShowFoursquareModal] = useState(false);
   const foursquareEnabledRef = useRef(false);
+  // AI-discovered experiences state
+  const [experienceResults, setExperienceResults] = useState<DiscoveredExperienceMarker[]>([]);
+  const experienceLayerRef = useRef<any>(null); // eslint-disable-line @typescript-eslint/no-explicit-any -- Leaflet LayerGroup
+  const [selectedExperience, setSelectedExperience] = useState<DiscoveredExperienceMarker | null>(null);
+  const setSelectedExperienceRef = useRef(setSelectedExperience);
+
+  // ── Marker filter pane state ────────────────────────────────────────────────
+  const [markerFilterOpen, setMarkerFilterOpen] = useState(false);
+  const [markerHidden, setMarkerHidden] = useState<MarkerVisibility>({});
+  // Current map viewport bounds — updated on moveend for filter pane
+  const [mapBounds, setMapBounds] = useState<{ south: number; west: number; north: number; east: number } | null>(null);
 
   // ── Daily POI state ─────────────────────────────────────────────────────────
   const [tripPois, setTripPois] = useState<DailyPoiResponse[]>([]);
@@ -282,6 +328,188 @@ export default function MapPage() {
   const isGoogleProviderRef = useRef(false);
   // Flag set by Google Maps IconMouseEvent handler to suppress Leaflet's click
   const googlePoiClickedRef = useRef(false);
+
+  // ── Marker filter helpers ──────────────────────────────────────────────────
+  const PROVIDER_LABELS: Record<string, string> = {
+    osm: 'OpenStreetMap',
+    google: 'Google Places',
+    p4n: 'Park4Night',
+    tripadvisor: 'Tripadvisor',
+    foursquare: 'Foursquare',
+    chatgpt: 'AI Research',
+  };
+
+  const PROVIDER_BADGE_STYLES: Record<string, string> = {
+    osm: 'text-neutral-700 bg-neutral-50 border-neutral-200',
+    google: 'text-blue-700 bg-blue-50 border-blue-200',
+    p4n: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+    tripadvisor: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+    foursquare: 'text-blue-700 bg-blue-50 border-blue-200',
+    chatgpt: 'text-amber-700 bg-amber-50 border-amber-200',
+  };
+
+  const TYPE_LABELS: Record<string, string> = {
+    tourist_attraction: 'Attractions',
+    park: 'Parks',
+    rv_park: 'RV Parks',
+    campground: 'Campgrounds',
+    mobile_home_park: 'Mobile Home Parks',
+    rest_stop: 'Rest Stops',
+    parking: 'Parking',
+    park4night: 'Park4Night',
+  };
+
+  /** Build filter groups from current marker data */
+  const buildFilterGroups = useCallback((): MarkerFilterGroup[] => {
+    const groups: MarkerFilterGroup[] = [];
+    const b = mapBounds;
+    const inBounds = (lat: number, lng: number) =>
+      !b || (lat >= b.south && lat <= b.north && lng >= b.west && lng <= b.east);
+
+    // Nearby results — group by provider, items by type
+    if (nearbyResults.length > 0) {
+      const visibleNearby = nearbyResults.filter((p) => inBounds(p.lat, p.lng));
+      const byProvider = new Map<string, Map<string, number>>();
+      for (const p of visibleNearby) {
+        const prov = p.provider ?? 'osm';
+        if (prov === 'chatgpt') continue;
+        if (!byProvider.has(prov)) byProvider.set(prov, new Map());
+        const types = byProvider.get(prov)!; // eslint-disable-line @typescript-eslint/no-non-null-assertion -- checked above
+        types.set(p.type, (types.get(p.type) ?? 0) + 1);
+      }
+      for (const [prov, types] of byProvider) {
+        const items: MarkerFilterGroup['items'] = [];
+        for (const [type, count] of types) {
+          items.push({
+            key: type,
+            label: TYPE_LABELS[type] ?? type.replace(/_/g, ' '),
+            count,
+            iconHtml: makeNearbyMarkerHtml(type, prov),
+          });
+        }
+        items.sort((a, b) => b.count - a.count);
+        groups.push({ key: `nearby:${prov}`, label: PROVIDER_LABELS[prov] ?? prov, items });
+      }
+
+      // ChatGPT cached places (from Show Cached)
+      const chatgptPlaces = visibleNearby.filter((p) => p.provider === 'chatgpt');
+      if (chatgptPlaces.length > 0) {
+        const byStars = new Map<number, number>();
+        for (const p of chatgptPlaces) {
+          const stars = p.michelinStars ?? 1;
+          byStars.set(stars, (byStars.get(stars) ?? 0) + 1);
+        }
+        const items: MarkerFilterGroup['items'] = [];
+        for (const [stars, count] of [...byStars].sort((a, b) => b[0] - a[0])) {
+          items.push({
+            key: `stars:${stars}`,
+            label: `${'★'.repeat(stars)} ${stars === 3 ? 'Must-visit' : stars === 2 ? 'Worth a detour' : 'Worth a stop'}`,
+            count,
+            iconHtml: makeExperienceMarkerHtml(stars),
+          });
+        }
+        groups.push({ key: 'nearby:chatgpt', label: 'AI Cached', items });
+      }
+    }
+
+    // AI experience results (from AI Research button)
+    if (experienceResults.length > 0) {
+      const visibleExp = experienceResults.filter((e) => inBounds(e.approximateLat, e.approximateLng));
+      if (visibleExp.length > 0) {
+        const byStars = new Map<number, number>();
+        for (const e of visibleExp) {
+          byStars.set(e.michelinStars, (byStars.get(e.michelinStars) ?? 0) + 1);
+        }
+        const items: MarkerFilterGroup['items'] = [];
+        for (const [stars, count] of [...byStars].sort((a, b) => b[0] - a[0])) {
+          items.push({
+            key: `stars:${stars}`,
+            label: `${'★'.repeat(stars)} ${stars === 3 ? 'Must-visit' : stars === 2 ? 'Worth a detour' : 'Worth a stop'}`,
+            count,
+            iconHtml: makeExperienceMarkerHtml(stars),
+          });
+        }
+        groups.push({ key: 'experience', label: 'AI Research', items });
+      }
+    }
+
+    // POIs
+    if (tripPois.length > 0) {
+      const visiblePois = tripPois.filter((p) => inBounds(p.latitude, p.longitude));
+      if (visiblePois.length > 0) {
+        groups.push({
+          key: 'poi',
+          label: 'Points of Interest',
+          items: [{
+            key: 'poi',
+            label: 'POIs',
+            count: visiblePois.length,
+            iconHtml: '<div style="width:20px;height:20px;border-radius:50%;background:#7c3aed;border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:12px;line-height:1;">📌</div>',
+          }],
+        });
+      }
+    }
+
+    return groups;
+  }, [nearbyResults, experienceResults, tripPois, mapBounds]);
+
+  const handleToggleFilterItem = useCallback((groupKey: string, itemKey: string) => {
+    setMarkerHidden((prev) => {
+      const next = { ...prev };
+      const set = new Set(next[groupKey] ?? []);
+      if (set.has(itemKey)) {
+        set.delete(itemKey);
+      } else {
+        set.add(itemKey);
+      }
+      next[groupKey] = set;
+      return next;
+    });
+  }, []);
+
+  const handleToggleFilterGroup = useCallback((groupKey: string) => {
+    setMarkerHidden((prev) => {
+      const groups = buildFilterGroups();
+      const group = groups.find((g) => g.key === groupKey);
+      if (!group) return prev;
+      const next = { ...prev };
+      const currentSet = next[groupKey] ?? new Set<string>();
+      const allHidden = group.items.every((i) => currentSet.has(i.key));
+      if (allHidden) {
+        // Show all
+        next[groupKey] = new Set<string>();
+      } else {
+        // Hide all
+        next[groupKey] = new Set(group.items.map((i) => i.key));
+      }
+      return next;
+    });
+  }, [buildFilterGroups]);
+
+  /** Check if a nearby place should be visible given current filter state */
+  const isNearbyVisible = useCallback((place: NearbyPlace): boolean => {
+    const prov = place.provider ?? 'osm';
+    if (prov === 'chatgpt') {
+      const stars = place.michelinStars ?? 1;
+      return !(markerHidden['nearby:chatgpt']?.has(`stars:${stars}`));
+    }
+    return !(markerHidden[`nearby:${prov}`]?.has(place.type));
+  }, [markerHidden]);
+
+  /** Check if an experience marker should be visible */
+  const isExperienceVisible = useCallback((exp: DiscoveredExperienceMarker): boolean => {
+    return !(markerHidden['experience']?.has(`stars:${exp.michelinStars}`));
+  }, [markerHidden]);
+
+  /** Check if POIs should be visible */
+  const arePoIsVisible = !markerHidden['poi']?.has('poi');
+
+  // Auto-open filter pane when markers appear
+  useEffect(() => {
+    if (nearbyResults.length > 0 || experienceResults.length > 0) {
+      setMarkerFilterOpen(true);
+    }
+  }, [nearbyResults, experienceResults]);
 
   // Restore persisted state from localStorage on mount (avoids hydration mismatch)
   useEffect(() => {
@@ -326,8 +554,12 @@ export default function MapPage() {
     setNearbyResults([]);
     setNearbyStatus('idle');
     setSelectedNearbyPlace(null);
+    setExperienceResults([]);
+    setSelectedExperience(null);
     setTripPois([]);
     setSelectedPoi(null);
+    setMarkerFilterOpen(false);
+    setMarkerHidden({});
     setSelectedTripId(trip.id);
     setSidebarView('detail');
     // Fetch POIs for this trip
@@ -342,8 +574,12 @@ export default function MapPage() {
     setNearbyResults([]);
     setNearbyStatus('idle');
     setSelectedNearbyPlace(null);
+    setExperienceResults([]);
+    setSelectedExperience(null);
     setTripPois([]);
     setSelectedPoi(null);
+    setMarkerFilterOpen(false);
+    setMarkerHidden({});
     setSelectedTripId(null);
     setSidebarView('list');
   };
@@ -381,7 +617,7 @@ export default function MapPage() {
     }
   }, []);
 
-  // Render/clear nearby search result markers whenever results change
+  // Render/clear nearby search result markers whenever results or filter change
   useEffect(() => {
     if (!isMapReady || !mapRef.current) return;
     import('leaflet').then((L) => {
@@ -393,6 +629,7 @@ export default function MapPage() {
       if (nearbyResults.length === 0) return;
       const layer = L.layerGroup();
       for (const place of nearbyResults) {
+        if (!isNearbyVisible(place)) continue;
         // Use the provider's own icon image when available, else the emoji divIcon
         const icon = place.iconUrl
           ? L.icon({
@@ -400,10 +637,11 @@ export default function MapPage() {
               iconSize: [32, 40],
               iconAnchor: [16, 40],
               popupAnchor: [0, -40],
+              className: 'app-marker-shadow',
             })
           : L.divIcon({
               className: '',
-              html: makeNearbyMarkerHtml(place.type, place.provider),
+              html: makeNearbyMarkerHtml(place.type, place.provider, place.michelinStars),
               iconSize: [28, 28],
               iconAnchor: [14, 14],
             });
@@ -411,7 +649,11 @@ export default function MapPage() {
           icon,
           zIndexOffset: 500,
         });
-        marker.bindTooltip(place.name, { permanent: false, direction: 'top' });
+        marker.bindTooltip(place.name, {
+          permanent: false,
+          direction: 'top',
+          offset: place.iconUrl ? [0, -28] : [0, -14],
+        });
         const captured = place;
         marker.on('click', (e: any) => {
           L.DomEvent.stopPropagation(e);
@@ -422,7 +664,51 @@ export default function MapPage() {
       layer.addTo(mapRef.current);
       nearbyLayerRef.current = layer;
     });
-  }, [nearbyResults, isMapReady]);
+  }, [nearbyResults, isMapReady, isNearbyVisible]);
+
+  // Draw/update AI experience markers
+  useEffect(() => {
+    if (!isMapReady || !mapRef.current) return;
+    import('leaflet').then((L) => {
+      if (experienceLayerRef.current) {
+        mapRef.current.removeLayer(experienceLayerRef.current);
+        experienceLayerRef.current = null;
+      }
+      if (experienceResults.length === 0) return;
+      const layer = L.layerGroup();
+      for (const exp of experienceResults) {
+        if (!isExperienceVisible(exp)) continue;
+        const html = makeExperienceMarkerHtml(exp.michelinStars);
+        const icon = L.divIcon({
+          className: '',
+          html,
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+        });
+        const marker = L.marker([exp.approximateLat, exp.approximateLng], {
+          icon,
+          zIndexOffset: 600,
+        });
+        marker.bindTooltip(
+          `${'★'.repeat(exp.michelinStars)} ${exp.name}`,
+          { permanent: false, direction: 'top', offset: [0, -14] },
+        );
+        const captured = exp;
+        marker.on('click', (e: L.LeafletEvent) => {
+          L.DomEvent.stopPropagation(e);
+          setSelectedExperienceRef.current(captured);
+        });
+        marker.addTo(layer);
+      }
+      layer.addTo(mapRef.current);
+      experienceLayerRef.current = layer;
+    });
+  }, [experienceResults, isMapReady, isExperienceVisible]);
+
+  // Keep experience ref in sync
+  useEffect(() => {
+    setSelectedExperienceRef.current = setSelectedExperience;
+  });
 
   // Draw/update POI markers whenever tripPois or the map changes
   useEffect(() => {
@@ -432,7 +718,7 @@ export default function MapPage() {
         mapRef.current.removeLayer(poiLayerRef.current);
         poiLayerRef.current = null;
       }
-      if (tripPois.length === 0) return;
+      if (tripPois.length === 0 || !arePoIsVisible) return;
       const layer = L.layerGroup();
       for (const poi of tripPois) {
         const marker = L.marker([poi.latitude, poi.longitude], {
@@ -444,7 +730,7 @@ export default function MapPage() {
           }),
           zIndexOffset: 400,
         });
-        marker.bindTooltip(poi.name, { permanent: false, direction: 'top' });
+        marker.bindTooltip(poi.name, { permanent: false, direction: 'top', offset: [0, -14] });
         const captured = poi;
         marker.on('click', (e: any) => {
           L.DomEvent.stopPropagation(e);
@@ -455,7 +741,7 @@ export default function MapPage() {
       layer.addTo(mapRef.current);
       poiLayerRef.current = layer;
     });
-  }, [tripPois, isMapReady]);
+  }, [tripPois, isMapReady, arePoIsVisible]);
 
   const handleRouteData = useCallback(
     (segments: RouteSegmentResponse[], destinations: DailyDestinationResponse[]) => {
@@ -485,7 +771,7 @@ export default function MapPage() {
               iconSize: [28, 28],
               iconAnchor: [14, 14],
             }),
-          }).bindTooltip(home.name, { permanent: false, direction: 'top' });
+          }).bindTooltip(home.name, { permanent: false, direction: 'top', offset: [0, -14] });
           destMarkersRef.current.set('home', { marker: homeMarker, label: 'H' });
           homeMarker.addTo(group);
         }
@@ -504,7 +790,7 @@ export default function MapPage() {
               iconSize: [28, 28],
               iconAnchor: [14, 14],
             }),
-          }).bindTooltip(dest.name, { permanent: false, direction: 'top' });
+          }).bindTooltip(dest.name, { permanent: false, direction: 'top', offset: [0, -14] });
           destMarkersRef.current.set(dest.id, { marker: destMarker, label });
           destMarker.addTo(group);
         });
@@ -559,6 +845,7 @@ export default function MapPage() {
             marker.bindTooltip(`~${Math.round(wp.targetDurationSeconds / 60)} min`, {
               permanent: false,
               direction: 'top',
+              offset: [0, -6],
             });
             marker.on('dragend', () => {
               const latlng = marker.getLatLng();
@@ -834,6 +1121,37 @@ export default function MapPage() {
     }
   }, []);
 
+  const handleAiResearchArea = useCallback(async () => {
+    if (!mapRef.current) return;
+    setContextMenu(null);
+    statusBarRef.current?.pushStatus('AI researching visible area...');
+    try {
+      const b = mapRef.current.getBounds();
+      const sw = b.getSouthWest();
+      const ne = b.getNorthEast();
+      const res = await fetch('/api/discover-experiences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bounds: { south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        statusBarRef.current?.pushStatus(`AI Research failed: ${data.error ?? res.status}`, JSON.stringify(data));
+        return;
+      }
+      const experiences = data.experiences ?? [];
+      setExperienceResults(experiences);
+      statusBarRef.current?.pushStatus(
+        `AI Research: ${experiences.length} experiences${data.cached ? ' (cached)' : ''} — ${data.tokenUsage?.totalTokens ?? 0} tokens`,
+      );
+    } catch (err) {
+      console.error('[MapPage] AI area research error:', err);
+      statusBarRef.current?.pushStatus('AI Research failed', String(err));
+    }
+  }, []);
+
   const handleNearbySearch = useCallback(
     async (type: string) => {
       if (!nearbySearchPos || !mapRef.current) return;
@@ -906,19 +1224,39 @@ export default function MapPage() {
   );
 
   const handleAddAsDestination = useCallback(
-    async (destinationId: string) => {
-      if (!selectedNearbyPlace) return;
+    async (destinationIdOrDate: string) => {
+      if (!selectedNearbyPlace || !selectedTripId) return;
       setNearbyDestPickerOpen(false);
       try {
-        const res = await fetch(`/api/daily-destinations/${destinationId}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name: selectedNearbyPlace.name,
-            latitude: selectedNearbyPlace.lat,
-            longitude: selectedNearbyPlace.lng,
-          }),
-        });
+        // If it looks like a date (YYYY-MM-DD), create a new destination; otherwise PATCH existing
+        const isDate = /^\d{4}-\d{2}-\d{2}$/.test(destinationIdOrDate);
+        let res: Response;
+        const municipality = selectedNearbyPlace.address || null;
+        if (isDate) {
+          res = await fetch('/api/daily-destinations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tripId: selectedTripId,
+              dayDate: destinationIdOrDate,
+              name: selectedNearbyPlace.name,
+              municipality,
+              latitude: selectedNearbyPlace.lat,
+              longitude: selectedNearbyPlace.lng,
+            }),
+          });
+        } else {
+          res = await fetch(`/api/daily-destinations/${destinationIdOrDate}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: selectedNearbyPlace.name,
+              municipality,
+              latitude: selectedNearbyPlace.lat,
+              longitude: selectedNearbyPlace.lng,
+            }),
+          });
+        }
         if (!res.ok) {
           console.error('[MapPage] Add as destination failed:', res.status);
           return;
@@ -930,7 +1268,7 @@ export default function MapPage() {
         console.error('[MapPage] Failed to add as destination:', err);
       }
     },
-    [selectedNearbyPlace],
+    [selectedNearbyPlace, selectedTripId],
   );
 
   // Add a nearby search result as a POI for the given destination's day
@@ -962,6 +1300,119 @@ export default function MapPage() {
       }
     },
     [selectedNearbyPlace, selectedTripId],
+  );
+
+  // Add an AI-discovered experience — picker state for via-point, destination, and POI
+  const [experiencePoiPickerOpen, setExperiencePoiPickerOpen] = useState(false);
+  const [experienceSegmentPickerOpen, setExperienceSegmentPickerOpen] = useState(false);
+  const [experienceDestPickerOpen, setExperienceDestPickerOpen] = useState(false);
+
+  const handleAddExperienceAsVia = useCallback(
+    async (segmentId: string) => {
+      if (!selectedExperience) return;
+      setExperienceSegmentPickerOpen(false);
+      try {
+        const res = await fetch(`/api/route-segments/${segmentId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            latitude: selectedExperience.approximateLat,
+            longitude: selectedExperience.approximateLng,
+          }),
+        });
+        if (!res.ok) {
+          console.error('[MapPage] Add experience as via failed:', res.status);
+          return;
+        }
+        const updatedSegment: RouteSegmentResponse = await res.json();
+        const newSegments = currentSegmentsRef.current.map((s) =>
+          s.id === updatedSegment.id ? updatedSegment : s,
+        );
+        skipFitBoundsRef.current += 2;
+        handleRouteData(newSegments, currentDestinationsRef.current);
+        setSegmentRefreshTrigger((prev) => prev + 1);
+        setSelectedExperience(null);
+        statusBarRef.current?.pushStatus(`Added "${selectedExperience.name}" as via-point`);
+      } catch (err) {
+        console.error('[MapPage] Failed to add experience as via-point:', err);
+      }
+    },
+    [selectedExperience, handleRouteData],
+  );
+
+  const handleAddExperienceAsDestination = useCallback(
+    async (destinationIdOrDate: string) => {
+      if (!selectedExperience || !selectedTripId) return;
+      setExperienceDestPickerOpen(false);
+      try {
+        const isDate = /^\d{4}-\d{2}-\d{2}$/.test(destinationIdOrDate);
+        let res: Response;
+        if (isDate) {
+          res = await fetch('/api/daily-destinations', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              tripId: selectedTripId,
+              dayDate: destinationIdOrDate,
+              name: selectedExperience.name,
+              latitude: selectedExperience.approximateLat,
+              longitude: selectedExperience.approximateLng,
+            }),
+          });
+        } else {
+          res = await fetch(`/api/daily-destinations/${destinationIdOrDate}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: selectedExperience.name,
+              latitude: selectedExperience.approximateLat,
+              longitude: selectedExperience.approximateLng,
+            }),
+          });
+        }
+        if (!res.ok) {
+          console.error('[MapPage] Add experience as destination failed:', res.status);
+          return;
+        }
+        setDestinationRefreshTrigger((prev) => prev + 1);
+        setSelectedExperience(null);
+        statusBarRef.current?.pushStatus(`Added "${selectedExperience.name}" as destination`);
+      } catch (err) {
+        console.error('[MapPage] Failed to add experience as destination:', err);
+      }
+    },
+    [selectedExperience, selectedTripId],
+  );
+
+  const handleAddExperienceAsPoi = useCallback(
+    async (destId: string) => {
+      if (!selectedExperience || !selectedTripId) return;
+      setExperiencePoiPickerOpen(false);
+      const dest = currentDestinationsRef.current.find((d) => d.id === destId);
+      if (!dest) return;
+      try {
+        const res = await fetch('/api/daily-pois', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tripId: selectedTripId,
+            dayDate: new Date(dest.dayDate).toISOString().split('T')[0],
+            name: selectedExperience.name,
+            latitude: selectedExperience.approximateLat,
+            longitude: selectedExperience.approximateLng,
+          }),
+        });
+        if (res.ok) {
+          const newPoi = await res.json();
+          setTripPois((prev) => [...prev, newPoi]);
+          setSelectedExperience(null);
+          statusBarRef.current?.pushStatus(`Added "${selectedExperience.name}" as POI`);
+        }
+      } catch (err) {
+        console.error('[MapPage] Failed to add experience as POI:', err);
+      }
+    },
+    [selectedExperience, selectedTripId],
   );
 
   // Zoom the map to a set of lat/lng points (called from day-badge clicks)
@@ -1158,7 +1609,7 @@ export default function MapPage() {
           });
         });
 
-        // Save map position/zoom to localStorage on every move
+        // Save map position/zoom to localStorage on every move; update filter bounds
         map.on('moveend', () => {
           const c = map.getCenter();
           savePersistedState({
@@ -1168,6 +1619,10 @@ export default function MapPage() {
             mapZoom: map.getZoom(),
             selectedDayDestId: selectedDayDestIdRef.current,
           });
+          const b = map.getBounds();
+          const sw = b.getSouthWest();
+          const ne = b.getNorthEast();
+          setMapBounds({ south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng });
         });
 
         // Add tile layer for the selected map provider, then mark map ready
@@ -1324,9 +1779,21 @@ export default function MapPage() {
               tripadvisorEnabled={tripadvisorEnabledRef.current}
               onSearchFoursquare={handleOpenFoursquareModal}
               foursquareEnabled={foursquareEnabledRef.current}
+              onAiResearch={handleAiResearchArea}
               onAddPoi={handleOpenAddPoiModal}
               selectedDayLabel={getDayLabel(selectedDayDestIdRef.current, currentDestinationsRef.current)}
               onClose={() => setContextMenu(null)}
+            />
+          )}
+
+          {/* Marker filter pane */}
+          {markerFilterOpen && (
+            <MarkerFilterPane
+              groups={buildFilterGroups()}
+              hidden={markerHidden}
+              onToggleItem={handleToggleFilterItem}
+              onToggleGroup={handleToggleFilterGroup}
+              onClose={() => setMarkerFilterOpen(false)}
             />
           )}
 
@@ -1426,30 +1893,46 @@ export default function MapPage() {
             );
             const dayLabel = dayIdx >= 0 ? `Day ${dayIdx + 1}` : '';
             return (
-              <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-[900] bg-white rounded-xl shadow-2xl border border-neutral-200 p-4 w-72 flex flex-col gap-2">
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <p className="font-semibold text-neutral-900 text-sm">{selectedPoi.name}</p>
-                    {dayLabel && (
-                      <p className="text-xs text-neutral-500 mt-0.5">{dayLabel}</p>
-                    )}
-                  </div>
+              <PlacePopup
+                name={selectedPoi.name}
+                subtitle={dayLabel || undefined}
+                onClose={() => setSelectedPoi(null)}
+                badge={
+                  <span className="inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border text-violet-700 bg-violet-50 border-violet-200">
+                    My POI
+                  </span>
+                }
+                links={
+                  isGoogleProviderRef.current ? (
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${selectedPoi.latitude},${selectedPoi.longitude}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary-600 hover:underline"
+                    >
+                      Open in Google Maps ↗
+                    </a>
+                  ) : (
+                    <a
+                      href={`https://www.openstreetmap.org/?mlat=${selectedPoi.latitude}&mlon=${selectedPoi.longitude}#map=17/${selectedPoi.latitude}/${selectedPoi.longitude}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary-600 hover:underline"
+                    >
+                      Open in OpenStreetMap ↗
+                    </a>
+                  )
+                }
+                actions={
                   <button
                     type="button"
-                    onClick={() => setSelectedPoi(null)}
-                    className="text-neutral-400 hover:text-neutral-600 text-lg leading-none flex-shrink-0"
+                    onClick={handleDeletePoi}
+                    className="w-full text-sm text-red-600 border border-red-200 rounded-md py-1.5 hover:bg-red-50 transition-colors"
                   >
-                    ×
+                    Delete POI
                   </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleDeletePoi}
-                  className="w-full text-sm text-red-600 border border-red-200 rounded-md py-1.5 hover:bg-red-50 transition-colors"
-                >
-                  Delete POI
-                </button>
-              </div>
+                }
+              />
             );
           })()}
 
@@ -1478,40 +1961,66 @@ export default function MapPage() {
 
           {/* Selected nearby place popup */}
           {selectedNearbyPlace && (
-            <div className="absolute bottom-4 left-4 bg-white rounded-lg shadow-xl border border-neutral-200 p-4 z-[800] w-72 max-w-[calc(100%-2rem)]">
-              <div className="flex items-start justify-between gap-2 mb-2">
-                <div>
+            <PlacePopup
+              name={selectedNearbyPlace.name}
+              subtitle={selectedNearbyPlace.type.replace(/_/g, ' ')}
+              onClose={() => {
+                setSelectedNearbyPlace(null);
+                setNearbySegmentPickerOpen(false);
+                setNearbyDestPickerOpen(false);
+                setNearbyPoiPickerOpen(false);
+              }}
+              badge={
+                selectedNearbyPlace.provider ? (
+                  <span className={`inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border ${PROVIDER_BADGE_STYLES[selectedNearbyPlace.provider] ?? 'text-neutral-700 bg-neutral-50 border-neutral-200'}`}>
+                    {PROVIDER_LABELS[selectedNearbyPlace.provider] ?? selectedNearbyPlace.provider}
+                  </span>
+                ) : null
+              }
+              links={
+                <>
                   {selectedNearbyPlace.provider === 'p4n' && (
-                    <span className="inline-block text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 mb-1">Park4Night</span>
+                    <a
+                      href={`https://park4night.com/en/place/${selectedNearbyPlace.placeId.replace('p4n:', '')}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-emerald-600 hover:underline"
+                    >
+                      Open in Park4Night ↗
+                    </a>
                   )}
-                  {selectedNearbyPlace.provider === 'tripadvisor' && (
-                    <span className="inline-block text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5 mb-1">Tripadvisor</span>
+                  {selectedNearbyPlace.provider === 'tripadvisor' && selectedNearbyPlace.webUrl && (
+                    <a
+                      href={selectedNearbyPlace.webUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-emerald-600 hover:underline"
+                    >
+                      Open in Tripadvisor ↗
+                    </a>
                   )}
-                  {selectedNearbyPlace.provider === 'foursquare' && (
-                    <span className="inline-block text-[10px] font-semibold text-blue-700 bg-blue-50 border border-blue-200 rounded px-1.5 py-0.5 mb-1">Foursquare</span>
+                  {isGoogleProviderRef.current ? (
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${selectedNearbyPlace.lat},${selectedNearbyPlace.lng}&query_place_id=${selectedNearbyPlace.placeId}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary-600 hover:underline"
+                    >
+                      Open in Google Maps ↗
+                    </a>
+                  ) : (
+                    <a
+                      href={`https://www.openstreetmap.org/?mlat=${selectedNearbyPlace.lat}&mlon=${selectedNearbyPlace.lng}#map=17/${selectedNearbyPlace.lat}/${selectedNearbyPlace.lng}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary-600 hover:underline"
+                    >
+                      Open in OpenStreetMap ↗
+                    </a>
                   )}
-                  <p className="font-semibold text-neutral-900 text-sm leading-tight">
-                    {selectedNearbyPlace.name}
-                  </p>
-                  <p className="text-xs text-neutral-500 mt-0.5 capitalize">
-                    {selectedNearbyPlace.type.replace(/_/g, ' ')}
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    setSelectedNearbyPlace(null);
-                    setNearbySegmentPickerOpen(false);
-                    setNearbyDestPickerOpen(false);
-                    setNearbyPoiPickerOpen(false);
-                  }}
-                  className="text-neutral-400 hover:text-neutral-600 text-lg leading-none shrink-0"
-                  aria-label="Close"
-                >
-                  ×
-                </button>
-              </div>
-
-              <div className="flex flex-col gap-2">
+                </>
+              }
+            >
                 {/* Enriched properties */}
                 {(selectedNearbyPlace.address || selectedNearbyPlace.phone ||
                   selectedNearbyPlace.website || selectedNearbyPlace.openingHours ||
@@ -1573,49 +2082,6 @@ export default function MapPage() {
                     <p className="mt-1 whitespace-pre-wrap">{selectedNearbyPlace.description}</p>
                   </details>
                 )}
-
-                {/* External links: source provider + map provider */}
-                <div className="flex flex-col gap-0.5">
-                  {selectedNearbyPlace.provider === 'p4n' && (
-                    <a
-                      href={`https://park4night.com/en/place/${selectedNearbyPlace.placeId.replace('p4n:', '')}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-emerald-600 hover:underline"
-                    >
-                      Open in Park4Night ↗
-                    </a>
-                  )}
-                  {selectedNearbyPlace.provider === 'tripadvisor' && selectedNearbyPlace.webUrl && (
-                    <a
-                      href={selectedNearbyPlace.webUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-emerald-600 hover:underline"
-                    >
-                      Open in Tripadvisor ↗
-                    </a>
-                  )}
-                  {isGoogleProviderRef.current ? (
-                    <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${selectedNearbyPlace.lat},${selectedNearbyPlace.lng}&query_place_id=${selectedNearbyPlace.placeId}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-primary-600 hover:underline"
-                    >
-                      Open in Google Maps ↗
-                    </a>
-                  ) : (
-                    <a
-                      href={`https://www.openstreetmap.org/?mlat=${selectedNearbyPlace.lat}&mlon=${selectedNearbyPlace.lng}#map=17/${selectedNearbyPlace.lat}/${selectedNearbyPlace.lng}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-primary-600 hover:underline"
-                    >
-                      Open in OpenStreetMap ↗
-                    </a>
-                  )}
-                </div>
 
                 {/* Action buttons */}
                 {!nearbySegmentPickerOpen && !nearbyDestPickerOpen && !nearbyPoiPickerOpen && (() => {
@@ -1700,20 +2166,38 @@ export default function MapPage() {
                 )}
 
                 {/* Destination picker for "Add as daily destination" */}
-                {nearbyDestPickerOpen && (
+                {nearbyDestPickerOpen && (() => {
+                  const dates = currentTripDatesRef.current;
+                  const dests = currentDestinationsRef.current;
+                  const tripDays: Array<{ dateStr: string; dest: DailyDestinationResponse | null }> = [];
+                  if (dates) {
+                    const start = new Date(dates.start + 'T00:00:00Z');
+                    const stop = new Date(dates.stop + 'T00:00:00Z');
+                    for (let d = new Date(start); d <= stop; d.setUTCDate(d.getUTCDate() + 1)) {
+                      const ds = d.toISOString().split('T')[0];
+                      const dest = dests.find((dd) => new Date(dd.dayDate).toISOString().split('T')[0] === ds) ?? null;
+                      tripDays.push({ dateStr: ds, dest });
+                    }
+                  } else {
+                    for (const dest of dests) {
+                      tripDays.push({ dateStr: new Date(dest.dayDate).toISOString().split('T')[0], dest });
+                    }
+                  }
+                  return (
                   <div className="mt-1">
-                    <p className="text-xs text-neutral-500 mb-1">Replace destination for day:</p>
+                    <p className="text-xs text-neutral-500 mb-1">Set destination for day:</p>
                     <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                      {currentDestinationsRef.current.map((dest) => (
+                      {tripDays.map(({ dateStr, dest }, idx) => (
                         <button
-                          key={dest.id}
-                          onClick={() => handleAddAsDestination(dest.id)}
+                          key={dateStr}
+                          onClick={() => handleAddAsDestination(dest ? dest.id : dateStr)}
                           className="text-left text-xs px-2 py-1.5 rounded hover:bg-primary-50 hover:text-primary-700 text-neutral-700 border border-neutral-100"
                         >
-                          {new Date(dest.dayDate).toLocaleDateString(undefined, {
+                          <span className="font-medium">Day {idx + 1}</span>
+                          {' '}{new Date(dateStr + 'T00:00:00Z').toLocaleDateString(undefined, {
                             weekday: 'short', month: 'short', day: 'numeric',
                           })}
-                          {dest.name ? ` — ${dest.name}` : ''}
+                          {dest?.name ? ` — ${dest.name}` : ''}
                         </button>
                       ))}
                     </div>
@@ -1724,7 +2208,8 @@ export default function MapPage() {
                       ← Back
                     </button>
                   </div>
-                )}
+                  );
+                })()}
 
                 {/* Day picker for "Add as POI" */}
                 {nearbyPoiPickerOpen && (() => {
@@ -1755,8 +2240,237 @@ export default function MapPage() {
                     </div>
                   );
                 })()}
-              </div>
-            </div>
+            </PlacePopup>
+          )}
+          {/* Selected AI experience popup */}
+          {selectedExperience && (
+            <PlacePopup
+              name={selectedExperience.name}
+              subtitle={`${selectedExperience.category.replace(/_/g, ' ')} · ${selectedExperience.nearestCity}, ${selectedExperience.country}`}
+              onClose={() => {
+                setSelectedExperience(null);
+                setExperiencePoiPickerOpen(false);
+                setExperienceSegmentPickerOpen(false);
+                setExperienceDestPickerOpen(false);
+              }}
+              badge={
+                <>
+                  <span className={`inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border ${PROVIDER_BADGE_STYLES.chatgpt}`}>
+                    AI Research
+                  </span>
+                  {' '}
+                  <span
+                    className="inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1"
+                    style={{
+                      color: EXPERIENCE_STAR_COLORS[selectedExperience.michelinStars]?.text ?? '#0369a1',
+                      background: EXPERIENCE_STAR_COLORS[selectedExperience.michelinStars]?.bg ?? '#e0f2fe',
+                      border: `1px solid ${EXPERIENCE_STAR_COLORS[selectedExperience.michelinStars]?.border ?? '#38bdf8'}`,
+                    }}
+                  >
+                    {'★'.repeat(selectedExperience.michelinStars)}{' '}
+                    {selectedExperience.michelinStars === 3 ? 'Must-visit' : selectedExperience.michelinStars === 2 ? 'Worth a detour' : 'Worth a stop'}
+                  </span>
+                </>
+              }
+              links={
+                isGoogleProviderRef.current ? (
+                  <a
+                    href={`https://www.google.com/maps/search/?api=1&query=${selectedExperience.approximateLat},${selectedExperience.approximateLng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary-600 hover:underline"
+                  >
+                    Open in Google Maps ↗
+                  </a>
+                ) : (
+                  <a
+                    href={`https://www.openstreetmap.org/?mlat=${selectedExperience.approximateLat}&mlon=${selectedExperience.approximateLng}#map=15/${selectedExperience.approximateLat}/${selectedExperience.approximateLng}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-primary-600 hover:underline"
+                  >
+                    Open in OpenStreetMap ↗
+                  </a>
+                )
+              }
+            >
+                <p className="text-xs text-neutral-700">{selectedExperience.description}</p>
+
+                <details className="text-xs text-neutral-600 border-t border-neutral-100 pt-2">
+                  <summary className="cursor-pointer text-neutral-500 hover:text-neutral-700">Why this rating</summary>
+                  <p className="mt-1 whitespace-pre-wrap">{selectedExperience.reasoning}</p>
+                </details>
+
+                {selectedExperience.seasonalNotes && (
+                  <p className="text-xs text-neutral-500 border-t border-neutral-100 pt-2">
+                    <span className="font-medium">Seasonal:</span> {selectedExperience.seasonalNotes}
+                  </p>
+                )}
+
+                {selectedExperience.estimatedDetourKm > 0 && (
+                  <p className="text-xs text-neutral-500">
+                    ~{selectedExperience.estimatedDetourKm} km detour from route
+                  </p>
+                )}
+
+                {/* Action buttons */}
+                {!experienceSegmentPickerOpen && !experienceDestPickerOpen && !experiencePoiPickerOpen && (() => {
+                  const preSelId = selectedDayDestIdRef.current;
+                  const preSelDest = preSelId && preSelId !== 'home'
+                    ? currentDestinationsRef.current.find((d) => d.id === preSelId)
+                    : null;
+                  const poiDayLabel = preSelDest
+                    ? getDayLabel(preSelId, currentDestinationsRef.current)
+                    : null;
+                  return (
+                    <div className="flex flex-col gap-1.5 mt-1">
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => {
+                            setExperienceDestPickerOpen(false);
+                            setExperiencePoiPickerOpen(false);
+                            setExperienceSegmentPickerOpen(true);
+                          }}
+                          className="flex-1 px-3 py-1.5 text-xs font-medium bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded transition-all"
+                        >
+                          Add as via-point
+                        </button>
+                        <button
+                          onClick={() => {
+                            setExperienceSegmentPickerOpen(false);
+                            setExperiencePoiPickerOpen(false);
+                            setExperienceDestPickerOpen(true);
+                          }}
+                          className="flex-1 px-3 py-1.5 text-xs font-medium bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded transition-all"
+                        >
+                          Add as destination
+                        </button>
+                      </div>
+                      {poiDayLabel && preSelId ? (
+                        <button
+                          onClick={() => handleAddExperienceAsPoi(preSelId)}
+                          className="w-full px-3 py-1.5 text-xs font-medium bg-violet-50 hover:bg-violet-100 text-violet-700 rounded transition-all"
+                        >
+                          📌 Add POI to {poiDayLabel}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setExperienceSegmentPickerOpen(false);
+                            setExperienceDestPickerOpen(false);
+                            setExperiencePoiPickerOpen(true);
+                          }}
+                          className="w-full px-3 py-1.5 text-xs font-medium bg-violet-50 hover:bg-violet-100 text-violet-700 rounded transition-all"
+                        >
+                          📌 Add as POI…
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Segment picker for "Add as via-point" */}
+                {experienceSegmentPickerOpen && (
+                  <div className="mt-1">
+                    <p className="text-xs text-neutral-500 mb-1">Select a day segment:</p>
+                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
+                      {currentSegmentsRef.current.map((seg) => (
+                        <button
+                          key={seg.id}
+                          onClick={() => handleAddExperienceAsVia(seg.id)}
+                          className="text-left text-xs px-2 py-1.5 rounded hover:bg-primary-50 hover:text-primary-700 text-neutral-700 border border-neutral-100"
+                        >
+                          {new Date(seg.dayDate).toLocaleDateString(undefined, {
+                            weekday: 'short', month: 'short', day: 'numeric',
+                          })}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => setExperienceSegmentPickerOpen(false)}
+                      className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
+                    >
+                      ← Back
+                    </button>
+                  </div>
+                )}
+
+                {/* Destination picker for "Add as daily destination" */}
+                {experienceDestPickerOpen && (() => {
+                  const dates = currentTripDatesRef.current;
+                  const dests = currentDestinationsRef.current;
+                  const tripDays: Array<{ dateStr: string; dest: DailyDestinationResponse | null }> = [];
+                  if (dates) {
+                    const start = new Date(dates.start + 'T00:00:00Z');
+                    const stop = new Date(dates.stop + 'T00:00:00Z');
+                    for (let d = new Date(start); d <= stop; d.setUTCDate(d.getUTCDate() + 1)) {
+                      const ds = d.toISOString().split('T')[0];
+                      const dest = dests.find((dd) => new Date(dd.dayDate).toISOString().split('T')[0] === ds) ?? null;
+                      tripDays.push({ dateStr: ds, dest });
+                    }
+                  } else {
+                    for (const dest of dests) {
+                      tripDays.push({ dateStr: new Date(dest.dayDate).toISOString().split('T')[0], dest });
+                    }
+                  }
+                  return (
+                  <div className="mt-1">
+                    <p className="text-xs text-neutral-500 mb-1">Set destination for day:</p>
+                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
+                      {tripDays.map(({ dateStr, dest }, idx) => (
+                        <button
+                          key={dateStr}
+                          onClick={() => handleAddExperienceAsDestination(dest ? dest.id : dateStr)}
+                          className="text-left text-xs px-2 py-1.5 rounded hover:bg-primary-50 hover:text-primary-700 text-neutral-700 border border-neutral-100"
+                        >
+                          <span className="font-medium">Day {idx + 1}</span>
+                          {' '}{new Date(dateStr + 'T00:00:00Z').toLocaleDateString(undefined, {
+                            weekday: 'short', month: 'short', day: 'numeric',
+                          })}
+                          {dest?.name ? ` — ${dest.name}` : ''}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => setExperienceDestPickerOpen(false)}
+                      className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
+                    >
+                      ← Back
+                    </button>
+                  </div>
+                  );
+                })()}
+
+                {/* Day picker for "Add as POI" */}
+                {experiencePoiPickerOpen && (() => {
+                  const sortedDests = [...currentDestinationsRef.current]
+                    .filter((d) => d.latitude != null && d.longitude != null)
+                    .sort((a, b) => new Date(a.dayDate).getTime() - new Date(b.dayDate).getTime());
+                  return (
+                    <div className="mt-1">
+                      <p className="text-xs text-neutral-500 mb-1">Add POI to day:</p>
+                      <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
+                        {sortedDests.map((dest, idx) => (
+                          <button
+                            key={dest.id}
+                            onClick={() => handleAddExperienceAsPoi(dest.id)}
+                            className="text-left text-xs px-2 py-1.5 rounded hover:bg-violet-50 hover:text-violet-700 text-neutral-700 border border-neutral-100"
+                          >
+                            <span className="font-medium">Day {idx + 1}</span>
+                            {dest.name ? ` — ${dest.name}` : ''}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        onClick={() => setExperiencePoiPickerOpen(false)}
+                        className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
+                      >
+                        ← Back
+                      </button>
+                    </div>
+                  );
+                })()}
+            </PlacePopup>
           )}
         </div>
 
@@ -1826,6 +2540,9 @@ export default function MapPage() {
                 onDaySelect={handleDaySelect}
                 pois={tripPois}
                 initialSelectedDayId={restoredRef.current?.selectedDayDestId}
+                onStatusMessage={(text, detail) => statusBarRef.current?.pushStatus(text, detail)}
+                onTripDatesChange={(start, stop) => { currentTripDatesRef.current = { start, stop }; }}
+                onExperiencesDiscovered={setExperienceResults}
               />
             )}
 

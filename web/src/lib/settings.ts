@@ -26,6 +26,7 @@ export const SETTING_KEYS = {
   HOME_LONGITUDE: 'home.longitude',
   TRIPADVISOR_API_KEY: 'tripadvisor.api_key',
   FOURSQUARE_API_KEY: 'foursquare.api_key',
+  OPENAI_API_KEY: 'openai.api_key',
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];

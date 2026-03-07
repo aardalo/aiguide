@@ -12,6 +12,7 @@ import HomeForm from './components/HomeForm';
 import RoutingProviderForm from './components/RoutingProviderForm';
 import TripadvisorSettingsForm from './components/TripadvisorSettingsForm';
 import FoursquareSettingsForm from './components/FoursquareSettingsForm';
+import OpenAiSettingsForm from './components/OpenAiSettingsForm';
 
 export default function SettingsPage() {
   return (
@@ -63,6 +64,13 @@ export default function SettingsPage() {
             API key for nearby place search (food, hotels, outdoors, shopping).
           </p>
           <FoursquareSettingsForm />
+        </section>
+        <section>
+          <h2 className="text-lg font-semibold text-neutral-900 mb-1">OpenAI</h2>
+          <p className="text-sm text-neutral-600 mb-4">
+            API key for AI-powered route experience discovery (Michelin-style recommendations).
+          </p>
+          <OpenAiSettingsForm />
         </section>
       </main>
     </div>
