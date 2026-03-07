@@ -56,6 +56,10 @@ interface TripDetailProps {
   onStatusMessage?: (text: string, detail?: string) => void;
   /** Callback when the trip's date range changes (e.g. after insert-day). */
   onTripDatesChange?: (startDate: string, stopDate: string) => void;
+  /** Called when a POI or parkup name is clicked in the sidebar. */
+  onPoiClick?: (poi: DailyPoiResponse) => void;
+  /** Called when a destination name is clicked in the sidebar. */
+  onDestinationClick?: (dest: DailyDestinationResponse) => void;
   /** Callback when AI Research discovers experiences — used to show markers on map. */
   onExperiencesDiscovered?: (experiences: Array<{
     name: string;
@@ -87,6 +91,8 @@ export default function TripDetail({
   initialSelectedDayId,
   onStatusMessage,
   onTripDatesChange,
+  onPoiClick,
+  onDestinationClick,
   onExperiencesDiscovered,
 }: TripDetailProps) {
   const [trip, setTrip] = useState<TripResponse | null>(null);
@@ -94,6 +100,7 @@ export default function TripDetail({
   const [error, setError] = useState<string | null>(null);
   const [isTogglingPlanMode, setIsTogglingPlanMode] = useState(false);
   const [isResearching, setIsResearching] = useState(false);
+  const [totalDistanceKm, setTotalDistanceKm] = useState<number | null>(null);
 
   // Notify parent when trip dates change
   useEffect(() => {
@@ -416,6 +423,30 @@ export default function TripDetail({
               </p>
             </div>
           </div>
+
+          {totalDistanceKm != null && (
+            <div className="flex items-start gap-3">
+              <svg
+                className="mt-1 h-5 w-5 text-neutral-400"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"
+                />
+              </svg>
+              <div className="flex-1">
+                <p className="text-sm font-medium text-neutral-500">Distance</p>
+                <p className="mt-1 text-base text-neutral-900">
+                  {totalDistanceKm.toFixed(0)} km
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Plan Mode Toggle */}
@@ -463,7 +494,11 @@ export default function TripDetail({
         {trip.planMode && (
           <DailyDestinations
             trip={trip}
-            onRouteData={onRouteData}
+            onRouteData={(segments, destinations) => {
+              const totalM = segments.reduce((sum, s) => sum + s.distanceMeters, 0);
+              setTotalDistanceKm(totalM > 0 ? totalM / 1000 : null);
+              onRouteData?.(segments, destinations);
+            }}
             segmentRefreshTrigger={segmentRefreshTrigger}
             destinationRefreshTrigger={destinationRefreshTrigger}
             onFitPoints={onFitPoints}
@@ -474,6 +509,8 @@ export default function TripDetail({
             onUpdate={() => {
               if (tripId) fetchTripDetails(tripId);
             }}
+            onPoiClick={onPoiClick}
+            onDestinationClick={onDestinationClick}
           />
         )}
 

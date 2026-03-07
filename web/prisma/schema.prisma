@@ -105,6 +105,7 @@ model DailyPoi {
   latitude  Float
   longitude Float
   notes     String?
+  category  String   @default("poi") @db.VarChar(20)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)

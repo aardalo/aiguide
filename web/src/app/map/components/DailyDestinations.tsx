@@ -41,9 +41,13 @@ interface DailyDestinationsProps {
   pois?: DailyPoiResponse[];
   /** Pre-selected day destination ID to restore on mount (from persisted UI state). */
   initialSelectedDayId?: string | null;
+  /** Called when a POI or parkup name is clicked in the sidebar. */
+  onPoiClick?: (poi: DailyPoiResponse) => void;
+  /** Called when a destination name is clicked in the sidebar. */
+  onDestinationClick?: (dest: DailyDestinationResponse) => void;
 }
 
-export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId }: DailyDestinationsProps) {
+export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId, onPoiClick, onDestinationClick }: DailyDestinationsProps) {
   const [destinations, setDestinations] = useState<DailyDestinationResponse[]>([]);
   const [segments, setSegments] = useState<RouteSegmentResponse[]>([]);
   const [home, setHome] = useState<{ name: string; latitude: number; longitude: number } | null>(null);
@@ -214,6 +218,33 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
     onUpdate?.();
   };
 
+  // Remove a day from the trip
+  const [removingDate, setRemovingDate] = useState<string | null>(null);
+  const handleRemoveDay = async (dateStr: string) => {
+    if (!confirm('Remove this day? The destination, POIs and route segment will be deleted and subsequent days shifted back.')) return;
+    setRemovingDate(dateStr);
+    try {
+      const res = await fetch(`/api/trips/${trip.id}/remove-day`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: dateStr }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        console.error('[DailyDestinations] Remove day failed:', data.error);
+        return;
+      }
+      const updatedTrip = await res.json();
+      onTripChange?.(updatedTrip);
+      await fetchDestinations();
+      await generateRoutes();
+    } catch (err) {
+      console.error('[DailyDestinations] Remove day error:', err);
+    } finally {
+      setRemovingDate(null);
+    }
+  };
+
   // Insert a blank day after the given date
   const [insertingAfter, setInsertingAfter] = useState<string | null>(null);
   const handleInsertDay = async (afterDate: string) => {
@@ -353,21 +384,6 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
         </div>
       )}
 
-      {/* Add/Edit Form */}
-      {(showAddForm || editingDestination) && (
-        <DestinationForm
-          trip={trip}
-          destination={editingDestination}
-          initialDate={addForDate}
-          onSuccess={handleFormSuccess}
-          onCancel={() => {
-            setShowAddForm(false);
-            setAddForDate(null);
-            setEditingDestination(null);
-          }}
-        />
-      )}
-
       {/* Pinned Home / departure row */}
       <div className="p-3 bg-neutral-50 rounded-lg border border-neutral-200 mb-2">
         <div className="flex items-center justify-between">
@@ -409,6 +425,8 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
           const destination = getDestinationForDate(date);
           const segment = getSegmentForDate(date);
           const dayPois = getPoisForDate(date);
+          const dateStr = date.toISOString().split('T')[0];
+          const showInlineForm = (showAddForm && addForDate === dateStr) || (editingDestination && destination && editingDestination.id === destination.id);
 
           return (
             <React.Fragment key={date.toISOString()}>
@@ -434,7 +452,7 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                 </div>
               )}
             <div
-              className="p-3 bg-neutral-50 rounded-lg border border-neutral-200 hover:bg-neutral-100 transition-colors"
+              className="relative p-3 bg-neutral-50 rounded-lg border border-neutral-200 hover:bg-neutral-100 transition-colors group/day"
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3 flex-1">
@@ -463,7 +481,14 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                     </p>
                     {destination ? (
                       <div className="mt-1">
-                        <p className="text-sm text-neutral-700">
+                        <p
+                          className={`text-sm text-neutral-700 ${destination.latitude != null && destination.longitude != null && onDestinationClick ? 'cursor-pointer hover:text-primary-600' : ''}`}
+                          onClick={() => {
+                            if (destination.latitude != null && destination.longitude != null && onDestinationClick) {
+                              onDestinationClick(destination);
+                            }
+                          }}
+                        >
                           {destination.name}
                           {destination.municipality && (
                             <span className="text-neutral-400"> ({destination.municipality})</span>
@@ -524,16 +549,69 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                 </div>
               )}
 
-              {/* POIs for this day */}
-              {dayPois.length > 0 && (
-                <div className="mt-1.5 ml-11 flex flex-col gap-0.5">
-                  {dayPois.map((poi) => (
-                    <div key={poi.id} className="flex items-center gap-1.5 text-xs text-violet-700">
-                      <span className="shrink-0">📌</span>
-                      <span className="truncate">{poi.name}</span>
-                    </div>
-                  ))}
+              {/* Parkups + POIs for this day */}
+              {dayPois.length > 0 && (() => {
+                const parkups = dayPois.filter((p) => p.category === 'parkup');
+                const regularPois = dayPois.filter((p) => p.category !== 'parkup');
+                return (
+                  <div className="mt-1.5 ml-11 flex flex-col gap-0.5">
+                    {parkups.map((p) => (
+                      <div
+                        key={p.id}
+                        className={`flex items-center gap-1.5 text-xs text-emerald-700 ${onPoiClick ? 'cursor-pointer hover:text-emerald-900' : ''}`}
+                        onClick={() => onPoiClick?.(p)}
+                      >
+                        <span className="shrink-0">🚐</span>
+                        <span className="truncate">{p.name}</span>
+                      </div>
+                    ))}
+                    {regularPois.map((p) => (
+                      <div
+                        key={p.id}
+                        className={`flex items-center gap-1.5 text-xs text-violet-700 ${onPoiClick ? 'cursor-pointer hover:text-violet-900' : ''}`}
+                        onClick={() => onPoiClick?.(p)}
+                      >
+                        <span className="shrink-0">📌</span>
+                        <span className="truncate">{p.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+
+              {/* Inline add/edit form for this day */}
+              {showInlineForm && (
+                <div className="mt-2">
+                  <DestinationForm
+                    trip={trip}
+                    destination={editingDestination && destination && editingDestination.id === destination.id ? editingDestination : null}
+                    initialDate={addForDate}
+                    onSuccess={handleFormSuccess}
+                    onCancel={() => {
+                      setShowAddForm(false);
+                      setAddForDate(null);
+                      setEditingDestination(null);
+                    }}
+                  />
                 </div>
+              )}
+
+              {/* Remove day button — lower-right, visible on hover */}
+              {tripDates.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dateStr = date.toISOString().split('T')[0];
+                    if (!removingDate) handleRemoveDay(dateStr);
+                  }}
+                  disabled={!!removingDate}
+                  className="absolute bottom-1.5 right-1.5 hidden group-hover/day:flex items-center justify-center w-5 h-5 rounded-full text-neutral-400 hover:text-error-600 hover:bg-error-50 text-xs transition-all disabled:opacity-50"
+                  title="Remove this day"
+                >
+                  {removingDate === date.toISOString().split('T')[0] ? (
+                    <span className="inline-block w-3 h-3 border-2 border-error-600 border-t-transparent rounded-full animate-spin" />
+                  ) : '×'}
+                </button>
               )}
             </div>
             </React.Fragment>

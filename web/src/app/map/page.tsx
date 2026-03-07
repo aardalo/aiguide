@@ -29,6 +29,7 @@ import PlacePopup from './components/PlacePopup';
 import type { TripResponse, DailyDestinationResponse, DailyPoiResponse } from '@/lib/schemas/trip';
 import type { RouteSegmentResponse, RouteWaypointResponse } from '@/lib/schemas/routing';
 import type { NearbyPlace } from '@/lib/nearby/types';
+import type { PlaceResult } from '@/lib/schemas/geocoding';
 import { decodePolyline } from '@/lib/polyline';
 
 // Small circular icons for draggable interval waypoint markers (STORY-007)
@@ -48,6 +49,22 @@ const NEARBY_PLACE_EMOJIS: Record<string, string> = {
   rest_stop:          '🛑',
   parking:            '🅿️',
   park4night:         '🚐',
+  // Park4Night sub-types
+  'Surrounded by nature':       '🌲',
+  'Parking lot day/night':      '🅿️',
+  'Rest area':                  '🛑',
+  'Picnic area':                '🧺',
+  'Free motorhome area':        '🚐',
+  'Paying motorhome area':      '🚐',
+  'Private car park for campers':'🚐',
+  'Off-road':                   '🏔️',
+  'On the farm':                '🌾',
+  'Camping':                    '⛺',
+  'Service area without parking':'🔧',
+  'Daytime parking only':       '🅿️',
+  'Homestays accommodation':    '🏠',
+  'Extra services':             '🔧',
+  'MH parking without services':'🚐',
 };
 
 function makeNearbyMarkerHtml(type: string, provider?: string, michelinStars?: number): string {
@@ -61,8 +78,9 @@ function makeNearbyMarkerHtml(type: string, provider?: string, michelinStars?: n
     return `<div style="width:28px;height:28px;border-radius:50%;background:#eff6ff;border:1.5px solid #60a5fa;box-shadow:0 2px 4px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#2563eb;cursor:pointer;">FS</div>`;
   }
   const emoji = NEARBY_PLACE_EMOJIS[type] ?? '📍';
-  const bg = type === 'park4night' ? '#ecfdf5' : '#fff';
-  const border = type === 'park4night' ? '#6ee7b7' : '#d4d4d4';
+  const isP4n = provider === 'p4n' || type === 'park4night';
+  const bg = isP4n ? '#ecfdf5' : '#fff';
+  const border = isP4n ? '#6ee7b7' : '#d4d4d4';
   return `<div style="width:28px;height:28px;border-radius:50%;background:${bg};border:1.5px solid ${border};box-shadow:0 2px 4px rgba(0,0,0,.25);display:flex;align-items:center;justify-content:center;font-size:16px;cursor:pointer;">${emoji}</div>`;
 }
 
@@ -309,7 +327,30 @@ export default function MapPage() {
 
   // ── Marker filter pane state ────────────────────────────────────────────────
   const [markerFilterOpen, setMarkerFilterOpen] = useState(false);
-  const [markerHidden, setMarkerHidden] = useState<MarkerVisibility>({});
+  const [markerHidden, setMarkerHidden] = useState<MarkerVisibility>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = localStorage.getItem('markerFilterHidden');
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, string[]>;
+      const result: MarkerVisibility = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        result[k] = new Set(v);
+      }
+      return result;
+    } catch {
+      return {};
+    }
+  });
+  // Persist marker filter to localStorage
+  useEffect(() => {
+    const serializable: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(markerHidden)) {
+      if (v.size > 0) serializable[k] = [...v];
+    }
+    localStorage.setItem('markerFilterHidden', JSON.stringify(serializable));
+  }, [markerHidden]);
+
   // Current map viewport bounds — updated on moveend for filter pane
   const [mapBounds, setMapBounds] = useState<{ south: number; west: number; north: number; east: number } | null>(null);
 
@@ -324,10 +365,67 @@ export default function MapPage() {
   // POI info popup (shown when a POI marker is clicked)
   const [selectedPoi, setSelectedPoi] = useState<DailyPoiResponse | null>(null);
   const setSelectedPoiRef = useRef(setSelectedPoi);
+  // Waypoint info popup (shown when a waypoint marker is clicked)
+  const [selectedWaypoint, setSelectedWaypoint] = useState<(RouteWaypointResponse & { segmentDuration?: number }) | null>(null);
+  const setSelectedWaypointRef = useRef(setSelectedWaypoint);
   // True when Google Maps is the tile provider (enables POI detection on click)
   const isGoogleProviderRef = useRef(false);
   // Flag set by Google Maps IconMouseEvent handler to suppress Leaflet's click
   const googlePoiClickedRef = useRef(false);
+
+  // ── Place search bar state ─────────────────────────────────────────────────
+  const [placeSearchQuery, setPlaceSearchQuery] = useState('');
+  const [placeSearchResults, setPlaceSearchResults] = useState<PlaceResult[]>([]);
+  const [placeSearching, setPlaceSearching] = useState(false);
+  const [placeSearchOpen, setPlaceSearchOpen] = useState(false);
+  const placeSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handlePlaceSearchChange = useCallback((value: string) => {
+    setPlaceSearchQuery(value);
+    if (placeSearchTimerRef.current) clearTimeout(placeSearchTimerRef.current);
+    if (value.trim().length < 3) {
+      setPlaceSearchResults([]);
+      setPlaceSearchOpen(false);
+      return;
+    }
+    placeSearchTimerRef.current = setTimeout(async () => {
+      setPlaceSearching(true);
+      try {
+        const res = await fetch(`/api/geocode?q=${encodeURIComponent(value.trim())}&limit=5`);
+        if (res.ok) {
+          const data: PlaceResult[] = await res.json();
+          setPlaceSearchResults(data);
+          setPlaceSearchOpen(data.length > 0);
+        }
+      } catch {
+        // silently degrade
+      } finally {
+        setPlaceSearching(false);
+      }
+    }, 400);
+  }, []);
+
+  const handlePlaceSelect = useCallback((place: PlaceResult) => {
+    setPlaceSearchOpen(false);
+    setPlaceSearchQuery(place.name);
+    if (!mapRef.current) return;
+    const L = (window as unknown as Record<string, unknown>).L as typeof import('leaflet');
+    mapRef.current.setView([place.latitude, place.longitude], 13, { animate: true });
+    // Drop a temporary marker to highlight the selected place
+    const tempMarker = L.marker([place.latitude, place.longitude], {
+      icon: L.divIcon({
+        className: '',
+        html: '<div style="width:14px;height:14px;border-radius:50%;background:#c0392b;border:3px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      }),
+    });
+    tempMarker.addTo(mapRef.current);
+    tempMarker.bindTooltip(place.displayName, { permanent: true, direction: 'top', offset: [0, -10] }).openTooltip();
+    setTimeout(() => {
+      tempMarker.remove();
+    }, 5000);
+  }, []);
 
   // ── Marker filter helpers ──────────────────────────────────────────────────
   const PROVIDER_LABELS: Record<string, string> = {
@@ -357,6 +455,18 @@ export default function MapPage() {
     rest_stop: 'Rest Stops',
     parking: 'Parking',
     park4night: 'Park4Night',
+    // Tripadvisor categories
+    'tripadvisor': 'All',
+    'tripadvisor:hotels': 'Hotels',
+    'tripadvisor:restaurants': 'Restaurants',
+    'tripadvisor:attractions': 'Attractions',
+    // Foursquare categories
+    'foursquare': 'All',
+    'foursquare:food': 'Food',
+    'foursquare:hotels': 'Hotels',
+    'foursquare:outdoors': 'Outdoors',
+    'foursquare:shopping': 'Shopping',
+    'foursquare:arts': 'Arts',
   };
 
   /** Build filter groups from current marker data */
@@ -558,6 +668,7 @@ export default function MapPage() {
     setSelectedExperience(null);
     setTripPois([]);
     setSelectedPoi(null);
+    setSelectedWaypoint(null);
     setMarkerFilterOpen(false);
     setMarkerHidden({});
     setSelectedTripId(trip.id);
@@ -578,6 +689,7 @@ export default function MapPage() {
     setSelectedExperience(null);
     setTripPois([]);
     setSelectedPoi(null);
+    setSelectedWaypoint(null);
     setMarkerFilterOpen(false);
     setMarkerHidden({});
     setSelectedTripId(null);
@@ -842,7 +954,10 @@ export default function MapPage() {
               icon: waypointIcon,
               draggable: true,
             });
-            marker.bindTooltip(`~${Math.round(wp.targetDurationSeconds / 60)} min`, {
+            const tooltipText = wp.isManual
+              ? 'Via-point'
+              : `~${Math.round(wp.targetDurationSeconds / 60)} min`;
+            marker.bindTooltip(tooltipText, {
               permanent: false,
               direction: 'top',
               offset: [0, -6],
@@ -850,6 +965,9 @@ export default function MapPage() {
             marker.on('dragend', () => {
               const latlng = marker.getLatLng();
               onWaypointMovedRef.current(wpId, latlng.lat, latlng.lng);
+            });
+            marker.on('click', () => {
+              setSelectedWaypointRef.current({ ...wp, segmentDuration: seg.durationSeconds });
             });
             marker.addTo(group);
           }
@@ -1246,6 +1364,25 @@ export default function MapPage() {
             }),
           });
         } else {
+          // Demote existing destination to a POI before replacing it
+          const oldDest = currentDestinationsRef.current.find((d) => d.id === destinationIdOrDate);
+          if (oldDest?.latitude != null && oldDest?.longitude != null) {
+            const poiRes = await fetch('/api/daily-pois', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                tripId: selectedTripId,
+                dayDate: new Date(oldDest.dayDate).toISOString().split('T')[0],
+                name: oldDest.name,
+                latitude: oldDest.latitude,
+                longitude: oldDest.longitude,
+              }),
+            });
+            if (poiRes.ok) {
+              const newPoi = await poiRes.json();
+              setTripPois((prev) => [...prev, newPoi]);
+            }
+          }
           res = await fetch(`/api/daily-destinations/${destinationIdOrDate}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -1297,6 +1434,36 @@ export default function MapPage() {
         }
       } catch (err) {
         console.error('[MapPage] Failed to add nearby place as POI:', err);
+      }
+    },
+    [selectedNearbyPlace, selectedTripId],
+  );
+
+  const handleAddAsParkupForDay = useCallback(
+    async (destId: string) => {
+      if (!selectedNearbyPlace || !selectedTripId) return;
+      const dest = currentDestinationsRef.current.find((d) => d.id === destId);
+      if (!dest) return;
+      try {
+        const res = await fetch('/api/daily-pois', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tripId: selectedTripId,
+            dayDate: new Date(dest.dayDate).toISOString().split('T')[0],
+            name: selectedNearbyPlace.name,
+            latitude: selectedNearbyPlace.lat,
+            longitude: selectedNearbyPlace.lng,
+            category: 'parkup',
+          }),
+        });
+        if (res.ok) {
+          const newPoi = await res.json();
+          setTripPois((prev) => [...prev, newPoi]);
+          setSelectedNearbyPlace(null);
+        }
+      } catch (err) {
+        console.error('[MapPage] Failed to add nearby place as parkup:', err);
       }
     },
     [selectedNearbyPlace, selectedTripId],
@@ -1360,6 +1527,25 @@ export default function MapPage() {
             }),
           });
         } else {
+          // Demote existing destination to a POI before replacing it
+          const oldDest = currentDestinationsRef.current.find((d) => d.id === destinationIdOrDate);
+          if (oldDest?.latitude != null && oldDest?.longitude != null) {
+            const poiRes = await fetch('/api/daily-pois', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                tripId: selectedTripId,
+                dayDate: new Date(oldDest.dayDate).toISOString().split('T')[0],
+                name: oldDest.name,
+                latitude: oldDest.latitude,
+                longitude: oldDest.longitude,
+              }),
+            });
+            if (poiRes.ok) {
+              const newPoi = await poiRes.json();
+              setTripPois((prev) => [...prev, newPoi]);
+            }
+          }
           res = await fetch(`/api/daily-destinations/${destinationIdOrDate}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
@@ -1415,6 +1601,37 @@ export default function MapPage() {
     [selectedExperience, selectedTripId],
   );
 
+  const handleAddExperienceAsParkup = useCallback(
+    async (destId: string) => {
+      if (!selectedExperience || !selectedTripId) return;
+      const dest = currentDestinationsRef.current.find((d) => d.id === destId);
+      if (!dest) return;
+      try {
+        const res = await fetch('/api/daily-pois', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tripId: selectedTripId,
+            dayDate: new Date(dest.dayDate).toISOString().split('T')[0],
+            name: selectedExperience.name,
+            latitude: selectedExperience.approximateLat,
+            longitude: selectedExperience.approximateLng,
+            category: 'parkup',
+          }),
+        });
+        if (res.ok) {
+          const newPoi = await res.json();
+          setTripPois((prev) => [...prev, newPoi]);
+          setSelectedExperience(null);
+          statusBarRef.current?.pushStatus(`Added "${selectedExperience.name}" as parkup`);
+        }
+      } catch (err) {
+        console.error('[MapPage] Failed to add experience as parkup:', err);
+      }
+    },
+    [selectedExperience, selectedTripId],
+  );
+
   // Zoom the map to a set of lat/lng points (called from day-badge clicks)
   const handleFitPoints = useCallback((points: [number, number][]) => {
     if (!mapRef.current || points.length === 0) return;
@@ -1461,6 +1678,19 @@ export default function MapPage() {
       });
     }
   }, []);
+
+  // ── Sidebar click-to-zoom handlers ────────────────────────────────────────
+  const handleSidebarPoiClick = useCallback((poi: DailyPoiResponse) => {
+    if (!mapRef.current || poi.latitude == null || poi.longitude == null) return;
+    mapRef.current.setView([poi.latitude, poi.longitude], 15, { animate: true });
+    setSelectedPoi(poi);
+  }, []);
+
+  const handleSidebarDestinationClick = useCallback((dest: DailyDestinationResponse) => {
+    if (!mapRef.current || dest.latitude == null || dest.longitude == null) return;
+    mapRef.current.setView([dest.latitude, dest.longitude], 13, { animate: true });
+    handleDaySelect(dest.id);
+  }, [handleDaySelect]);
 
   // Open the Add-POI modal at the context-menu position
   const handleOpenAddPoiModal = useCallback(() => {
@@ -1515,6 +1745,20 @@ export default function MapPage() {
       console.error('[MapPage] Failed to delete POI:', err);
     }
   }, [selectedPoi]);
+
+  // Delete a waypoint
+  const handleDeleteWaypoint = useCallback(async () => {
+    if (!selectedWaypoint) return;
+    try {
+      const res = await fetch(`/api/route-waypoints/${selectedWaypoint.id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setSelectedWaypoint(null);
+        setSegmentRefreshTrigger((prev) => prev + 1);
+      }
+    } catch (err) {
+      console.error('[MapPage] Failed to delete waypoint:', err);
+    }
+  }, [selectedWaypoint]);
 
   const handleDeleteCancel = () => {
     setTripToDelete(null);
@@ -1768,6 +2012,62 @@ export default function MapPage() {
             </div>
           )}
 
+          {/* Place search bar */}
+          <div className="absolute top-3 left-3 z-[700] w-80">
+            <div className="relative">
+              <input
+                type="text"
+                value={placeSearchQuery}
+                onChange={(e) => handlePlaceSearchChange(e.target.value)}
+                onFocus={() => { if (placeSearchResults.length > 0) setPlaceSearchOpen(true); }}
+                onBlur={() => { setTimeout(() => setPlaceSearchOpen(false), 200); }}
+                placeholder="Search for a place..."
+                className="w-full bg-white border border-neutral-300 rounded-lg shadow-md px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              />
+              {placeSearching && (
+                <span className="absolute right-2.5 top-1/2 -translate-y-1/2">
+                  <svg className="animate-spin h-4 w-4 text-neutral-400" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                  </svg>
+                </span>
+              )}
+              {!placeSearching && placeSearchQuery.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setPlaceSearchQuery(''); setPlaceSearchResults([]); setPlaceSearchOpen(false); }}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 text-sm"
+                  aria-label="Clear search"
+                >
+                  &times;
+                </button>
+              )}
+            </div>
+            {placeSearchOpen && placeSearchResults.length > 0 && (
+              <ul className="mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg overflow-hidden divide-y divide-neutral-100 max-h-64 overflow-y-auto">
+                {placeSearchResults.map((result) => {
+                  const secondary = result.displayName.indexOf(',') >= 0
+                    ? result.displayName.slice(result.displayName.indexOf(',') + 1).trim()
+                    : '';
+                  return (
+                    <li key={result.placeId}>
+                      <button
+                        type="button"
+                        onClick={() => handlePlaceSelect(result)}
+                        className="w-full text-left px-3 py-2 hover:bg-primary-50 transition-colors"
+                      >
+                        <p className="text-sm font-medium text-neutral-900">{result.name}</p>
+                        {secondary && (
+                          <p className="text-xs text-neutral-500 truncate">{secondary}</p>
+                        )}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
           {/* Context menu shown on map click */}
           {contextMenu && (
             <MapContextMenu
@@ -1937,6 +2237,38 @@ export default function MapPage() {
           })()}
 
 
+          {/* Selected waypoint popup */}
+          {selectedWaypoint && (
+            <PlacePopup
+              name={selectedWaypoint.isManual ? 'Via-point' : 'Waypoint'}
+              subtitle={
+                selectedWaypoint.isManual
+                  ? 'Manually placed routing handle'
+                  : `~${Math.round(selectedWaypoint.targetDurationSeconds / 60)} min from start`
+              }
+              onClose={() => setSelectedWaypoint(null)}
+              badge={
+                <span className={`inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border ${selectedWaypoint.isManual ? 'text-orange-700 bg-orange-50 border-orange-200' : 'text-blue-700 bg-blue-50 border-blue-200'}`}>
+                  {selectedWaypoint.isManual ? 'Manual' : 'Auto'}
+                </span>
+              }
+            >
+              <div className="text-xs text-neutral-500 space-y-0.5">
+                <p>{selectedWaypoint.latitude.toFixed(5)}, {selectedWaypoint.longitude.toFixed(5)}</p>
+                {!selectedWaypoint.isManual && selectedWaypoint.segmentDuration != null && selectedWaypoint.segmentDuration > 0 && (
+                  <p>{Math.round((selectedWaypoint.targetDurationSeconds / selectedWaypoint.segmentDuration) * 100)}% along segment</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleDeleteWaypoint}
+                className="w-full text-sm text-red-600 border border-red-200 rounded-md py-1.5 hover:bg-red-50 transition-colors"
+              >
+                Delete {selectedWaypoint.isManual ? 'via-point' : 'waypoint'}
+              </button>
+            </PlacePopup>
+          )}
+
           {/* Nearby search: loading indicator */}
           {nearbyStatus === 'searching' && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-[800] flex items-center gap-2 bg-white rounded-full shadow-lg border border-neutral-200 px-4 py-2 text-sm text-neutral-700">
@@ -2084,159 +2416,65 @@ export default function MapPage() {
                 )}
 
                 {/* Action buttons */}
-                {!nearbySegmentPickerOpen && !nearbyDestPickerOpen && !nearbyPoiPickerOpen && (() => {
+                {(() => {
                   const preSelId = selectedDayDestIdRef.current;
-                  const preSelDest = preSelId && preSelId !== 'home'
+                  const hasDaySelected = !!preSelId && preSelId !== 'home';
+                  const preSelDest = hasDaySelected
                     ? currentDestinationsRef.current.find((d) => d.id === preSelId)
                     : null;
-                  const poiDayLabel = preSelDest
-                    ? getDayLabel(preSelId, currentDestinationsRef.current)
+                  const selSegment = preSelDest
+                    ? currentSegmentsRef.current.find((s) => {
+                        const segDate = new Date(s.dayDate).toISOString().split('T')[0];
+                        const destDate = new Date(preSelDest.dayDate).toISOString().split('T')[0];
+                        return segDate === destDate;
+                      })
                     : null;
                   return (
-                    <div className="flex flex-col gap-1.5 mt-1">
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => {
-                            setNearbyDestPickerOpen(false);
-                            setNearbyPoiPickerOpen(false);
-                            setNearbySegmentPickerOpen(true);
-                          }}
-                          className="flex-1 px-3 py-1.5 text-xs font-medium bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded transition-all"
-                        >
-                          Add as via-point
-                        </button>
-                        <button
-                          onClick={() => {
-                            setNearbySegmentPickerOpen(false);
-                            setNearbyPoiPickerOpen(false);
-                            setNearbyDestPickerOpen(true);
-                          }}
-                          className="flex-1 px-3 py-1.5 text-xs font-medium bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded transition-all"
-                        >
-                          Add as destination
-                        </button>
-                      </div>
-                      {poiDayLabel && preSelId ? (
-                        <button
-                          onClick={() => handleAddAsPoiForDay(preSelId)}
-                          className="w-full px-3 py-1.5 text-xs font-medium bg-violet-50 hover:bg-violet-100 text-violet-700 rounded transition-all"
-                        >
-                          📌 Add POI to {poiDayLabel}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => {
-                            setNearbySegmentPickerOpen(false);
-                            setNearbyDestPickerOpen(false);
-                            setNearbyPoiPickerOpen(true);
-                          }}
-                          className="w-full px-3 py-1.5 text-xs font-medium bg-violet-50 hover:bg-violet-100 text-violet-700 rounded transition-all"
-                        >
-                          📌 Add as POI…
-                        </button>
+                    <div className="mt-1 group/addas relative">
+                      <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider mb-1">Add as</p>
+                      {!hasDaySelected && (
+                        <p className="hidden group-hover/addas:block absolute -top-6 left-0 right-0 text-[10px] text-warning-600 bg-warning-50 border border-warning-200 rounded px-2 py-0.5 text-center z-10">To add this place, select a day</p>
                       )}
-                    </div>
-                  );
-                })()}
-
-                {/* Segment picker for "Add as via-point" */}
-                {nearbySegmentPickerOpen && (
-                  <div className="mt-1">
-                    <p className="text-xs text-neutral-500 mb-1">Select a day segment:</p>
-                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                      {currentSegmentsRef.current.map((seg) => (
+                      <div className="flex gap-1.5">
                         <button
-                          key={seg.id}
-                          onClick={() => handleAddAsVia(seg.id)}
-                          className="text-left text-xs px-2 py-1.5 rounded hover:bg-primary-50 hover:text-primary-700 text-neutral-700 border border-neutral-100"
+                          disabled={!hasDaySelected}
+                          onClick={() => {
+                            if (!preSelId) return;
+                            handleAddAsDestination(preSelId!);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected ? 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
                         >
-                          {new Date(seg.dayDate).toLocaleDateString(undefined, {
-                            weekday: 'short', month: 'short', day: 'numeric',
-                          })}
+                          Destination
                         </button>
-                      ))}
-                    </div>
-                    <button
-                      onClick={() => setNearbySegmentPickerOpen(false)}
-                      className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
-                    >
-                      ← Back
-                    </button>
-                  </div>
-                )}
-
-                {/* Destination picker for "Add as daily destination" */}
-                {nearbyDestPickerOpen && (() => {
-                  const dates = currentTripDatesRef.current;
-                  const dests = currentDestinationsRef.current;
-                  const tripDays: Array<{ dateStr: string; dest: DailyDestinationResponse | null }> = [];
-                  if (dates) {
-                    const start = new Date(dates.start + 'T00:00:00Z');
-                    const stop = new Date(dates.stop + 'T00:00:00Z');
-                    for (let d = new Date(start); d <= stop; d.setUTCDate(d.getUTCDate() + 1)) {
-                      const ds = d.toISOString().split('T')[0];
-                      const dest = dests.find((dd) => new Date(dd.dayDate).toISOString().split('T')[0] === ds) ?? null;
-                      tripDays.push({ dateStr: ds, dest });
-                    }
-                  } else {
-                    for (const dest of dests) {
-                      tripDays.push({ dateStr: new Date(dest.dayDate).toISOString().split('T')[0], dest });
-                    }
-                  }
-                  return (
-                  <div className="mt-1">
-                    <p className="text-xs text-neutral-500 mb-1">Set destination for day:</p>
-                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                      {tripDays.map(({ dateStr, dest }, idx) => (
                         <button
-                          key={dateStr}
-                          onClick={() => handleAddAsDestination(dest ? dest.id : dateStr)}
-                          className="text-left text-xs px-2 py-1.5 rounded hover:bg-primary-50 hover:text-primary-700 text-neutral-700 border border-neutral-100"
+                          disabled={!hasDaySelected || !selSegment}
+                          onClick={() => {
+                            if (selSegment) handleAddAsVia(selSegment.id);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected && selSegment ? 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
                         >
-                          <span className="font-medium">Day {idx + 1}</span>
-                          {' '}{new Date(dateStr + 'T00:00:00Z').toLocaleDateString(undefined, {
-                            weekday: 'short', month: 'short', day: 'numeric',
-                          })}
-                          {dest?.name ? ` — ${dest.name}` : ''}
+                          Via
                         </button>
-                      ))}
-                    </div>
-                    <button
-                      onClick={() => setNearbyDestPickerOpen(false)}
-                      className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
-                    >
-                      ← Back
-                    </button>
-                  </div>
-                  );
-                })()}
-
-                {/* Day picker for "Add as POI" */}
-                {nearbyPoiPickerOpen && (() => {
-                  const sortedDests = [...currentDestinationsRef.current]
-                    .filter((d) => d.latitude != null && d.longitude != null)
-                    .sort((a, b) => new Date(a.dayDate).getTime() - new Date(b.dayDate).getTime());
-                  return (
-                    <div className="mt-1">
-                      <p className="text-xs text-neutral-500 mb-1">Add POI to day:</p>
-                      <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                        {sortedDests.map((dest, idx) => (
-                          <button
-                            key={dest.id}
-                            onClick={() => handleAddAsPoiForDay(dest.id)}
-                            className="text-left text-xs px-2 py-1.5 rounded hover:bg-violet-50 hover:text-violet-700 text-neutral-700 border border-neutral-100"
-                          >
-                            <span className="font-medium">Day {idx + 1}</span>
-                            {dest.name ? ` — ${dest.name}` : ''}
-                          </button>
-                        ))}
+                        <button
+                          disabled={!hasDaySelected}
+                          onClick={() => {
+                            if (preSelId) handleAddAsPoiForDay(preSelId);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected ? 'bg-violet-50 hover:bg-violet-100 text-violet-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
+                        >
+                          POI
+                        </button>
+                        <button
+                          disabled={!hasDaySelected}
+                          onClick={() => {
+                            if (!preSelId) return;
+                            handleAddAsParkupForDay(preSelId!);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
+                        >
+                          Parkup
+                        </button>
                       </div>
-                      <button
-                        onClick={() => setNearbyPoiPickerOpen(false)}
-                        className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
-                      >
-                        ← Back
-                      </button>
                     </div>
                   );
                 })()}
@@ -2314,159 +2552,65 @@ export default function MapPage() {
                 )}
 
                 {/* Action buttons */}
-                {!experienceSegmentPickerOpen && !experienceDestPickerOpen && !experiencePoiPickerOpen && (() => {
+                {(() => {
                   const preSelId = selectedDayDestIdRef.current;
-                  const preSelDest = preSelId && preSelId !== 'home'
+                  const hasDaySelected = !!preSelId && preSelId !== 'home';
+                  const preSelDest = hasDaySelected
                     ? currentDestinationsRef.current.find((d) => d.id === preSelId)
                     : null;
-                  const poiDayLabel = preSelDest
-                    ? getDayLabel(preSelId, currentDestinationsRef.current)
+                  const selSegment = preSelDest
+                    ? currentSegmentsRef.current.find((s) => {
+                        const segDate = new Date(s.dayDate).toISOString().split('T')[0];
+                        const destDate = new Date(preSelDest.dayDate).toISOString().split('T')[0];
+                        return segDate === destDate;
+                      })
                     : null;
                   return (
-                    <div className="flex flex-col gap-1.5 mt-1">
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => {
-                            setExperienceDestPickerOpen(false);
-                            setExperiencePoiPickerOpen(false);
-                            setExperienceSegmentPickerOpen(true);
-                          }}
-                          className="flex-1 px-3 py-1.5 text-xs font-medium bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded transition-all"
-                        >
-                          Add as via-point
-                        </button>
-                        <button
-                          onClick={() => {
-                            setExperienceSegmentPickerOpen(false);
-                            setExperiencePoiPickerOpen(false);
-                            setExperienceDestPickerOpen(true);
-                          }}
-                          className="flex-1 px-3 py-1.5 text-xs font-medium bg-neutral-100 hover:bg-neutral-200 text-neutral-700 rounded transition-all"
-                        >
-                          Add as destination
-                        </button>
-                      </div>
-                      {poiDayLabel && preSelId ? (
-                        <button
-                          onClick={() => handleAddExperienceAsPoi(preSelId)}
-                          className="w-full px-3 py-1.5 text-xs font-medium bg-violet-50 hover:bg-violet-100 text-violet-700 rounded transition-all"
-                        >
-                          📌 Add POI to {poiDayLabel}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => {
-                            setExperienceSegmentPickerOpen(false);
-                            setExperienceDestPickerOpen(false);
-                            setExperiencePoiPickerOpen(true);
-                          }}
-                          className="w-full px-3 py-1.5 text-xs font-medium bg-violet-50 hover:bg-violet-100 text-violet-700 rounded transition-all"
-                        >
-                          📌 Add as POI…
-                        </button>
+                    <div className="mt-1 group/addas relative">
+                      <p className="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider mb-1">Add as</p>
+                      {!hasDaySelected && (
+                        <p className="hidden group-hover/addas:block absolute -top-6 left-0 right-0 text-[10px] text-warning-600 bg-warning-50 border border-warning-200 rounded px-2 py-0.5 text-center z-10">To add this place, select a day</p>
                       )}
-                    </div>
-                  );
-                })()}
-
-                {/* Segment picker for "Add as via-point" */}
-                {experienceSegmentPickerOpen && (
-                  <div className="mt-1">
-                    <p className="text-xs text-neutral-500 mb-1">Select a day segment:</p>
-                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                      {currentSegmentsRef.current.map((seg) => (
+                      <div className="flex gap-1.5">
                         <button
-                          key={seg.id}
-                          onClick={() => handleAddExperienceAsVia(seg.id)}
-                          className="text-left text-xs px-2 py-1.5 rounded hover:bg-primary-50 hover:text-primary-700 text-neutral-700 border border-neutral-100"
+                          disabled={!hasDaySelected}
+                          onClick={() => {
+                            if (!preSelId) return;
+                            handleAddExperienceAsDestination(preSelId!);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected ? 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
                         >
-                          {new Date(seg.dayDate).toLocaleDateString(undefined, {
-                            weekday: 'short', month: 'short', day: 'numeric',
-                          })}
+                          Destination
                         </button>
-                      ))}
-                    </div>
-                    <button
-                      onClick={() => setExperienceSegmentPickerOpen(false)}
-                      className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
-                    >
-                      ← Back
-                    </button>
-                  </div>
-                )}
-
-                {/* Destination picker for "Add as daily destination" */}
-                {experienceDestPickerOpen && (() => {
-                  const dates = currentTripDatesRef.current;
-                  const dests = currentDestinationsRef.current;
-                  const tripDays: Array<{ dateStr: string; dest: DailyDestinationResponse | null }> = [];
-                  if (dates) {
-                    const start = new Date(dates.start + 'T00:00:00Z');
-                    const stop = new Date(dates.stop + 'T00:00:00Z');
-                    for (let d = new Date(start); d <= stop; d.setUTCDate(d.getUTCDate() + 1)) {
-                      const ds = d.toISOString().split('T')[0];
-                      const dest = dests.find((dd) => new Date(dd.dayDate).toISOString().split('T')[0] === ds) ?? null;
-                      tripDays.push({ dateStr: ds, dest });
-                    }
-                  } else {
-                    for (const dest of dests) {
-                      tripDays.push({ dateStr: new Date(dest.dayDate).toISOString().split('T')[0], dest });
-                    }
-                  }
-                  return (
-                  <div className="mt-1">
-                    <p className="text-xs text-neutral-500 mb-1">Set destination for day:</p>
-                    <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                      {tripDays.map(({ dateStr, dest }, idx) => (
                         <button
-                          key={dateStr}
-                          onClick={() => handleAddExperienceAsDestination(dest ? dest.id : dateStr)}
-                          className="text-left text-xs px-2 py-1.5 rounded hover:bg-primary-50 hover:text-primary-700 text-neutral-700 border border-neutral-100"
+                          disabled={!hasDaySelected || !selSegment}
+                          onClick={() => {
+                            if (selSegment) handleAddExperienceAsVia(selSegment.id);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected && selSegment ? 'bg-neutral-100 hover:bg-neutral-200 text-neutral-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
                         >
-                          <span className="font-medium">Day {idx + 1}</span>
-                          {' '}{new Date(dateStr + 'T00:00:00Z').toLocaleDateString(undefined, {
-                            weekday: 'short', month: 'short', day: 'numeric',
-                          })}
-                          {dest?.name ? ` — ${dest.name}` : ''}
+                          Via
                         </button>
-                      ))}
-                    </div>
-                    <button
-                      onClick={() => setExperienceDestPickerOpen(false)}
-                      className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
-                    >
-                      ← Back
-                    </button>
-                  </div>
-                  );
-                })()}
-
-                {/* Day picker for "Add as POI" */}
-                {experiencePoiPickerOpen && (() => {
-                  const sortedDests = [...currentDestinationsRef.current]
-                    .filter((d) => d.latitude != null && d.longitude != null)
-                    .sort((a, b) => new Date(a.dayDate).getTime() - new Date(b.dayDate).getTime());
-                  return (
-                    <div className="mt-1">
-                      <p className="text-xs text-neutral-500 mb-1">Add POI to day:</p>
-                      <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
-                        {sortedDests.map((dest, idx) => (
-                          <button
-                            key={dest.id}
-                            onClick={() => handleAddExperienceAsPoi(dest.id)}
-                            className="text-left text-xs px-2 py-1.5 rounded hover:bg-violet-50 hover:text-violet-700 text-neutral-700 border border-neutral-100"
-                          >
-                            <span className="font-medium">Day {idx + 1}</span>
-                            {dest.name ? ` — ${dest.name}` : ''}
-                          </button>
-                        ))}
+                        <button
+                          disabled={!hasDaySelected}
+                          onClick={() => {
+                            if (preSelId) handleAddExperienceAsPoi(preSelId);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected ? 'bg-violet-50 hover:bg-violet-100 text-violet-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
+                        >
+                          POI
+                        </button>
+                        <button
+                          disabled={!hasDaySelected}
+                          onClick={() => {
+                            if (!preSelId) return;
+                            handleAddExperienceAsParkup(preSelId!);
+                          }}
+                          className={`flex-1 px-2 py-1.5 text-xs font-medium rounded transition-all ${hasDaySelected ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700' : 'bg-neutral-50 text-neutral-300 cursor-not-allowed'}`}
+                        >
+                          Parkup
+                        </button>
                       </div>
-                      <button
-                        onClick={() => setExperiencePoiPickerOpen(false)}
-                        className="mt-1 text-xs text-neutral-400 hover:text-neutral-600"
-                      >
-                        ← Back
-                      </button>
                     </div>
                   );
                 })()}
@@ -2543,6 +2687,8 @@ export default function MapPage() {
                 onStatusMessage={(text, detail) => statusBarRef.current?.pushStatus(text, detail)}
                 onTripDatesChange={(start, stop) => { currentTripDatesRef.current = { start, stop }; }}
                 onExperiencesDiscovered={setExperienceResults}
+                onPoiClick={handleSidebarPoiClick}
+                onDestinationClick={handleSidebarDestinationClick}
               />
             )}
 

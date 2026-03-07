@@ -32,6 +32,11 @@ export default function PlacePopup({
               {subtitle}
             </p>
           )}
+          {links && (
+            <div className="flex flex-col gap-0.5 mt-1">
+              {links}
+            </div>
+          )}
         </div>
         <button
           onClick={onClose}
@@ -44,12 +49,6 @@ export default function PlacePopup({
 
       <div className="flex flex-col gap-2">
         {children}
-
-        {links && (
-          <div className="flex flex-col gap-0.5">
-            {links}
-          </div>
-        )}
 
         {actions}
       </div>

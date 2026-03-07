@@ -33,6 +33,156 @@ const patchBodySchema = z.object({
   longitude: z.number(),
 });
 
+/**
+ * DELETE /api/route-waypoints/:id
+ *   Delete a waypoint (manual or auto). If the deleted waypoint was a manual
+ *   via-point, the segment is re-routed without it and auto waypoints are
+ *   regenerated.
+ */
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const { id } = await params;
+
+  try {
+    const waypoint = await prisma.routeWaypoint.findUnique({
+      where: { id },
+      include: {
+        segment: {
+          include: { waypoints: { orderBy: { sequenceIndex: 'asc' } } },
+        },
+      },
+    });
+
+    if (!waypoint) {
+      return NextResponse.json({ error: 'Waypoint not found' }, { status: 404 });
+    }
+
+    const segment = waypoint.segment;
+
+    // If it's an auto waypoint, just delete it — no re-routing needed
+    if (!waypoint.isManual) {
+      await prisma.routeWaypoint.delete({ where: { id } });
+      const updated = await prisma.routeSegment.findUnique({
+        where: { id: segment.id },
+        include: { waypoints: { orderBy: { sequenceIndex: 'asc' } } },
+      });
+      return NextResponse.json(updated);
+    }
+
+    // Manual waypoint: re-route without it
+    // Resolve from-coordinates
+    let fromCoords: { latitude: number; longitude: number } | null = null;
+    if (segment.fromDestinationId === 'home') {
+      const [homeLatStr, homeLngStr] = await Promise.all([
+        getSetting(SETTING_KEYS.HOME_LATITUDE),
+        getSetting(SETTING_KEYS.HOME_LONGITUDE),
+      ]);
+      if (homeLatStr && homeLngStr) {
+        fromCoords = { latitude: parseFloat(homeLatStr), longitude: parseFloat(homeLngStr) };
+      }
+    } else {
+      const fromDest = await prisma.dailyDestination.findUnique({
+        where: { id: segment.fromDestinationId },
+        select: { latitude: true, longitude: true },
+      });
+      if (fromDest?.latitude != null && fromDest?.longitude != null) {
+        fromCoords = { latitude: fromDest.latitude, longitude: fromDest.longitude };
+      }
+    }
+
+    if (!fromCoords) {
+      return NextResponse.json({ error: 'Cannot resolve from-coordinates' }, { status: 422 });
+    }
+
+    const toDest = await prisma.dailyDestination.findUnique({
+      where: { id: segment.toDestinationId },
+      select: { latitude: true, longitude: true },
+    });
+    if (!toDest?.latitude || !toDest?.longitude) {
+      return NextResponse.json({ error: 'Cannot resolve to-coordinates' }, { status: 422 });
+    }
+    const toCoords = { latitude: toDest.latitude, longitude: toDest.longitude };
+
+    const trip = await prisma.trip.findUnique({
+      where: { id: segment.tripId },
+      select: { routingPreferences: true },
+    });
+    const preferences = trip?.routingPreferences
+      ? JSON.parse(trip.routingPreferences)
+      : undefined;
+
+    let provider;
+    try {
+      provider = await getActiveRoutingProvider();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load routing provider';
+      return NextResponse.json({ error: message }, { status: 503 });
+    }
+
+    // Build via-points from remaining manual waypoints (excluding the one being deleted)
+    const remainingViaPoints = segment.waypoints
+      .filter((wp) => wp.isManual && wp.id !== id)
+      .map((wp) => ({ latitude: wp.latitude, longitude: wp.longitude }));
+
+    const result = await provider.getRoute({
+      waypoints: [fromCoords, ...remainingViaPoints, toCoords],
+      preferences,
+    });
+
+    const encodedPolyline = result.legs[0]?.encodedPolyline ?? null;
+
+    // Update segment
+    await prisma.routeSegment.update({
+      where: { id: segment.id },
+      data: {
+        distanceMeters: result.totalDistanceMeters,
+        durationSeconds: result.totalDurationSeconds,
+        encodedPolyline,
+        provider: provider.id,
+      },
+    });
+
+    // Delete the target waypoint and all auto waypoints
+    await prisma.routeWaypoint.deleteMany({
+      where: { segmentId: segment.id, OR: [{ id }, { isManual: false }] },
+    });
+
+    // Regenerate auto waypoints
+    if (encodedPolyline) {
+      const autoWaypoints = generateDistanceWaypoints(encodedPolyline, result.totalDurationSeconds);
+      if (autoWaypoints.length > 0) {
+        const maxManualIdx = segment.waypoints
+          .filter((wp) => wp.isManual && wp.id !== id)
+          .reduce((max, wp) => Math.max(max, wp.sequenceIndex), -1);
+
+        await prisma.routeWaypoint.createMany({
+          data: autoWaypoints.map((wp, i) => ({
+            segmentId: segment.id,
+            sequenceIndex: maxManualIdx + 1 + i,
+            latitude: wp.latitude,
+            longitude: wp.longitude,
+            targetDurationSeconds: wp.targetDurationSeconds,
+            actualDurationSeconds: wp.actualDurationSeconds,
+            isManual: false,
+          })),
+        });
+      }
+    }
+
+    const updatedSegment = await prisma.routeSegment.findUnique({
+      where: { id: segment.id },
+      include: { waypoints: { orderBy: { sequenceIndex: 'asc' } } },
+    });
+
+    return NextResponse.json(updatedSegment);
+  } catch (err) {
+    console.error('[DELETE /api/route-waypoints/:id] Error:', err);
+    return NextResponse.json({ error: 'Failed to delete waypoint' }, { status: 500 });
+  }
+}
+
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> },

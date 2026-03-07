@@ -175,6 +175,7 @@ export const dailyPoiCreateSchema = z.object({
   latitude: z.number().min(-90).max(90),
   longitude: z.number().min(-180).max(180),
   notes: z.string().max(1000).nullable().optional(),
+  category: z.enum(['poi', 'parkup']).default('poi'),
 });
 
 export const dailyPoiResponseSchema = z.object({
@@ -185,6 +186,7 @@ export const dailyPoiResponseSchema = z.object({
   latitude: z.number(),
   longitude: z.number(),
   notes: z.string().nullable(),
+  category: z.string().default('poi'),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
 });
