@@ -60,9 +60,10 @@ export async function callOpenAi(
   apiKey: string,
   systemPrompt: string,
   userPrompt: string,
+  model?: string,
 ): Promise<OpenAiCallResult> {
   const body = {
-    model: DEFAULT_MODEL,
+    model: model || DEFAULT_MODEL,
     temperature: TEMPERATURE,
     max_output_tokens: MAX_OUTPUT_TOKENS,
     tools: [

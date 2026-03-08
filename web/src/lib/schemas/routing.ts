@@ -45,6 +45,7 @@ export const routeSegmentResponseSchema = z.object({
   distanceMeters: z.number().nonnegative(),
   durationSeconds: z.number().nonnegative(),
   encodedPolyline: z.string().nullable(),
+  branchId: z.string().cuid().nullable().optional(),
   waypoints: z.array(routeWaypointResponseSchema),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
@@ -54,5 +55,6 @@ export type RouteSegmentResponse = z.infer<typeof routeSegmentResponseSchema>;
 /** POST /api/route-segments — request body */
 export const routeSegmentGenerateSchema = z.object({
   tripId: z.string().cuid('tripId must be a valid CUID'),
+  branchId: z.string().cuid().nullable().optional(),
 });
 export type RouteSegmentGenerate = z.infer<typeof routeSegmentGenerateSchema>;

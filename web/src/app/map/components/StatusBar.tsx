@@ -11,6 +11,9 @@ export interface StatusMessage {
 
 export interface StatusBarHandle {
   pushStatus: (text: string, detail?: string) => void;
+  /** Show a persistent animated loading message. Cleared by pushStatus or clearLoading. */
+  setLoading: (text: string) => void;
+  clearLoading: () => void;
 }
 
 const DEFAULT_SUBTITLE = 'Plan your road trip with dates and destinations';
@@ -22,10 +25,13 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
   const [history, setHistory] = useState<StatusMessage[]>([]);
   const [active, setActive] = useState<StatusMessage | null>(null);
   const [fading, setFading] = useState(false);
+  const [loadingText, setLoadingText] = useState<string | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [detailMsg, setDetailMsg] = useState<StatusMessage | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const fadeRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const elapsedRef = useRef<ReturnType<typeof setInterval>>(undefined);
   const panelRef = useRef<HTMLDivElement>(null);
 
   const clearTimers = useCallback(() => {
@@ -33,7 +39,20 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
     if (fadeRef.current) clearTimeout(fadeRef.current);
   }, []);
 
+  const stopElapsedTimer = useCallback(() => {
+    if (elapsedRef.current) clearInterval(elapsedRef.current);
+    elapsedRef.current = undefined;
+  }, []);
+
+  const clearLoading = useCallback(() => {
+    setLoadingText(null);
+    setElapsedSeconds(0);
+    stopElapsedTimer();
+  }, [stopElapsedTimer]);
+
   const pushStatus = useCallback((text: string, detail?: string) => {
+    clearLoading();
+
     const msg: StatusMessage = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       text,
@@ -52,9 +71,21 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
         setFading(false);
       }, FADE_MS);
     }, STATUS_DURATION_MS);
-  }, [clearTimers]);
+  }, [clearTimers, clearLoading]);
 
-  useImperativeHandle(ref, () => ({ pushStatus }), [pushStatus]);
+  const setLoading = useCallback((text: string) => {
+    clearTimers();
+    setActive(null);
+    setFading(false);
+    setLoadingText(text);
+    setElapsedSeconds(0);
+    stopElapsedTimer();
+    elapsedRef.current = setInterval(() => {
+      setElapsedSeconds(s => s + 1);
+    }, 1000);
+  }, [clearTimers, stopElapsedTimer]);
+
+  useImperativeHandle(ref, () => ({ pushStatus, setLoading, clearLoading }), [pushStatus, setLoading, clearLoading]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -79,9 +110,17 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
     return () => document.removeEventListener('keydown', handle);
   }, [historyOpen, detailMsg]);
 
-  useEffect(() => () => clearTimers(), [clearTimers]);
+  useEffect(() => () => { clearTimers(); stopElapsedTimer(); }, [clearTimers, stopElapsedTimer]);
 
   const showingStatus = active && !fading;
+  const isLoading = loadingText !== null;
+
+  const formatElapsed = (s: number) => {
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return `${m}m ${sec.toString().padStart(2, '0')}s`;
+  };
 
   return (
     <div className="relative mt-1">
@@ -92,16 +131,34 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
           history.length > 0 ? 'cursor-pointer hover:text-neutral-800' : 'cursor-default'
         }`}
       >
+        {/* Default subtitle */}
         <span
           className="text-neutral-600 transition-opacity"
           style={{
-            opacity: showingStatus ? 0 : 1,
+            opacity: showingStatus || isLoading ? 0 : 1,
             transitionDuration: `${FADE_MS}ms`,
           }}
         >
           {DEFAULT_SUBTITLE}
         </span>
-        {active && (
+
+        {/* Loading animation */}
+        {isLoading && (
+          <span className="absolute inset-0 flex items-center gap-2 text-primary-700 font-medium truncate">
+            <span className="inline-flex items-center gap-[3px] shrink-0">
+              <span className="status-dot" style={{ animationDelay: '0s' }} />
+              <span className="status-dot" style={{ animationDelay: '0.2s' }} />
+              <span className="status-dot" style={{ animationDelay: '0.4s' }} />
+            </span>
+            <span>{loadingText}</span>
+            <span className="text-xs font-normal text-neutral-400 tabular-nums">
+              {formatElapsed(elapsedSeconds)}
+            </span>
+          </span>
+        )}
+
+        {/* Status message */}
+        {active && !isLoading && (
           <span
             className="absolute inset-0 text-primary-700 font-medium truncate transition-opacity"
             style={{

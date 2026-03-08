@@ -28,6 +28,8 @@ export interface DiscoveredExperience {
   sources?: string[];
 }
 
+export type AiProviderId = 'chatgpt' | 'claude';
+
 export interface DiscoveryResult {
   experiences: DiscoveredExperience[];
   tokenUsage: {
@@ -36,6 +38,8 @@ export interface DiscoveryResult {
     totalTokens: number;
   };
   cached: boolean;
+  /** Which AI provider produced these results */
+  aiProvider: AiProviderId;
 }
 
 export interface RouteSegmentDescription {

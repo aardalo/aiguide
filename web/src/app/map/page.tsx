@@ -26,11 +26,12 @@ import FoursquareSearchModal from './components/FoursquareSearchModal';
 import StatusBar, { type StatusBarHandle } from './components/StatusBar';
 import MarkerFilterPane, { type MarkerFilterGroup, type MarkerVisibility } from './components/MarkerFilterPane';
 import PlacePopup from './components/PlacePopup';
-import type { TripResponse, DailyDestinationResponse, DailyPoiResponse } from '@/lib/schemas/trip';
+import type { TripResponse, DailyDestinationResponse, DailyPoiResponse, BranchResponse } from '@/lib/schemas/trip';
 import type { RouteSegmentResponse, RouteWaypointResponse } from '@/lib/schemas/routing';
 import type { NearbyPlace } from '@/lib/nearby/types';
 import type { PlaceResult } from '@/lib/schemas/geocoding';
 import { decodePolyline } from '@/lib/polyline';
+import { MAIN_BRANCH_COLOR } from '@/lib/branches';
 
 // Small circular icons for draggable interval waypoint markers (STORY-007)
 // Auto-generated waypoints use a muted terracotta; manually-placed ones use blue.
@@ -68,7 +69,7 @@ const NEARBY_PLACE_EMOJIS: Record<string, string> = {
 };
 
 function makeNearbyMarkerHtml(type: string, provider?: string, michelinStars?: number): string {
-  if (provider === 'chatgpt' && michelinStars) {
+  if ((provider === 'chatgpt' || provider === 'claude') && michelinStars) {
     return makeExperienceMarkerHtml(michelinStars);
   }
   if (provider === 'tripadvisor') {
@@ -110,6 +111,8 @@ interface DiscoveredExperienceMarker {
   estimatedDetourKm: number;
   seasonalNotes?: string;
   sources?: string[];
+  /** Which AI provider discovered this experience */
+  aiProvider?: 'chatgpt' | 'claude';
 }
 
 /** Haversine distance in metres between two lat/lng points. */
@@ -124,12 +127,22 @@ function haversineMeters(lat1: number, lng1: number, lat2: number, lng2: number)
 }
 
 /** Build a labelled circular divIcon for destination/home markers. */
-function makeLabelIconHtml(label: string, selected = false): string {
-  const bg = selected ? '#c0440e' : '#e06319';
+function makeLabelIconHtml(label: string, selected = false, color = '#e06319'): string {
+  const bg = selected ? darkenHex(color, 0.2) : color;
   const shadow = selected
-    ? '0 0 0 3px #fff, 0 0 0 5px #e06319, 0 2px 8px rgba(0,0,0,.5)'
+    ? `0 0 0 3px #fff, 0 0 0 5px ${color}, 0 2px 8px rgba(0,0,0,.5)`
     : '0 1px 5px rgba(0,0,0,.45)';
-  return `<div style="width:28px;height:28px;border-radius:50%;background:${bg};border:2.5px solid #fff;box-shadow:${shadow};color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;line-height:1;">${label}</div>`;
+  const fontSize = label.length > 2 ? '9px' : '11px';
+  return `<div style="width:28px;height:28px;border-radius:50%;background:${bg};border:2.5px solid #fff;box-shadow:${shadow};color:#fff;font-size:${fontSize};font-weight:700;display:flex;align-items:center;justify-content:center;line-height:1;">${label}</div>`;
+}
+
+/** Darken a hex color by a given amount (0–1). */
+function darkenHex(hex: string, amount: number): string {
+  const n = parseInt(hex.replace('#', ''), 16);
+  const r = Math.max(0, Math.round(((n >> 16) & 0xff) * (1 - amount)));
+  const g = Math.max(0, Math.round(((n >> 8) & 0xff) * (1 - amount)));
+  const b = Math.max(0, Math.round((n & 0xff) * (1 - amount)));
+  return `#${((r << 16) | (g << 8) | b).toString(16).padStart(6, '0')}`;
 }
 
 // Fix for default marker icons in Next.js
@@ -295,6 +308,7 @@ export default function MapPage() {
   // STORY-007: current route data refs (stable across Leaflet event handlers)
   const currentSegmentsRef = useRef<RouteSegmentResponse[]>([]);
   const currentDestinationsRef = useRef<DailyDestinationResponse[]>([]);
+  const branchesRef = useRef<BranchResponse[]>([]);
   // Current trip date range — updated when the selected trip or its dates change
   const currentTripDatesRef = useRef<{ start: string; stop: string } | null>(null);
   // Ref to the latest handleWaypointMoved function so handleRouteData can
@@ -305,7 +319,7 @@ export default function MapPage() {
   // Selected day tracking — 'home' or a destination ID; updated by handleDaySelect
   const selectedDayDestIdRef = useRef<string | null>(null);
   // Map of id → {marker, label} for in-place icon updates on day selection
-  const destMarkersRef = useRef<Map<string, { marker: any; label: string }>>(new Map());
+  const destMarkersRef = useRef<Map<string, { marker: any; label: string; color: string }>>(new Map());
 
   // Counter: handleRouteData skips fitBounds while this is > 0.
   // Each waypoint drag/segment click adds 2 (one for the immediate redraw,
@@ -455,7 +469,8 @@ export default function MapPage() {
     p4n: 'Park4Night',
     tripadvisor: 'Tripadvisor',
     foursquare: 'Foursquare',
-    chatgpt: 'AI Research',
+    chatgpt: 'AI Research (ChatGPT)',
+    claude: 'AI Research (Claude)',
   };
 
   const PROVIDER_BADGE_STYLES: Record<string, string> = {
@@ -465,6 +480,7 @@ export default function MapPage() {
     tripadvisor: 'text-emerald-700 bg-emerald-50 border-emerald-200',
     foursquare: 'text-blue-700 bg-blue-50 border-blue-200',
     chatgpt: 'text-amber-700 bg-amber-50 border-amber-200',
+    claude: 'text-orange-700 bg-orange-50 border-orange-200',
   };
 
   const TYPE_LABELS: Record<string, string> = {
@@ -503,7 +519,7 @@ export default function MapPage() {
       const byProvider = new Map<string, Map<string, number>>();
       for (const p of visibleNearby) {
         const prov = p.provider ?? 'osm';
-        if (prov === 'chatgpt') continue;
+        if (prov === 'chatgpt' || prov === 'claude') continue;
         if (!byProvider.has(prov)) byProvider.set(prov, new Map());
         const types = byProvider.get(prov)!; // eslint-disable-line @typescript-eslint/no-non-null-assertion -- checked above
         types.set(p.type, (types.get(p.type) ?? 0) + 1);
@@ -522,11 +538,11 @@ export default function MapPage() {
         groups.push({ key: `nearby:${prov}`, label: PROVIDER_LABELS[prov] ?? prov, items });
       }
 
-      // ChatGPT cached places (from Show Cached)
-      const chatgptPlaces = visibleNearby.filter((p) => p.provider === 'chatgpt');
-      if (chatgptPlaces.length > 0) {
+      // AI-researched cached places (from Show Cached) — both ChatGPT and Claude
+      const aiCachedPlaces = visibleNearby.filter((p) => p.provider === 'chatgpt' || p.provider === 'claude');
+      if (aiCachedPlaces.length > 0) {
         const byStars = new Map<number, number>();
-        for (const p of chatgptPlaces) {
+        for (const p of aiCachedPlaces) {
           const stars = p.michelinStars ?? 1;
           byStars.set(stars, (byStars.get(stars) ?? 0) + 1);
         }
@@ -620,7 +636,7 @@ export default function MapPage() {
   /** Check if a nearby place should be visible given current filter state */
   const isNearbyVisible = useCallback((place: NearbyPlace): boolean => {
     const prov = place.provider ?? 'osm';
-    if (prov === 'chatgpt') {
+    if (prov === 'chatgpt' || prov === 'claude') {
       const stars = place.michelinStars ?? 1;
       return !(markerHidden['nearby:chatgpt']?.has(`stars:${stars}`));
     }
@@ -888,7 +904,23 @@ export default function MapPage() {
       const shouldFit = skipFitBoundsRef.current === 0;
       if (skipFitBoundsRef.current > 0) skipFitBoundsRef.current--;
 
-      import('leaflet').then((L) => {
+      // Fetch branches for color lookups
+      const tripId = destinations[0]?.tripId ?? segments[0]?.tripId;
+      const branchesPromise = tripId
+        ? fetch(`/api/branches?tripId=${tripId}`)
+            .then((r) => (r.ok ? r.json() : []))
+            .then((b: BranchResponse[]) => { branchesRef.current = b; return b; })
+            .catch(() => [] as BranchResponse[])
+        : Promise.resolve([] as BranchResponse[]);
+
+      // Helper to resolve branch color from branchId
+      const getBranchColor = (branchId: string | null | undefined): string => {
+        if (!branchId) return MAIN_BRANCH_COLOR;
+        const branch = branchesRef.current.find((b) => b.id === branchId);
+        return branch?.color ?? MAIN_BRANCH_COLOR;
+      };
+
+      Promise.all([import('leaflet'), branchesPromise]).then(([L]) => {
         clearRouteLayer();
 
         const group = L.layerGroup();
@@ -905,7 +937,7 @@ export default function MapPage() {
               iconAnchor: [14, 14],
             }),
           }).bindTooltip(home.name, { permanent: false, direction: 'top', offset: [0, -14] });
-          destMarkersRef.current.set('home', { marker: homeMarker, label: 'H' });
+          destMarkersRef.current.set('home', { marker: homeMarker, label: 'H', color: MAIN_BRANCH_COLOR });
           homeMarker.addTo(group);
         }
 
@@ -913,18 +945,39 @@ export default function MapPage() {
           .filter((d) => d.latitude != null && d.longitude != null)
           .sort((a, b) => new Date(a.dayDate).getTime() - new Date(b.dayDate).getTime());
 
-        sortedDests.forEach((dest, idx) => {
-          const label = String(idx + 1);
+        // Separate main vs branch destinations for numbering
+        const mainDests = sortedDests.filter((d) => !d.branchId);
+        // Build a map of date string → day number from main destinations
+        const dateToDayNum = new Map<string, number>();
+        mainDests.forEach((d, i) => {
+          dateToDayNum.set(new Date(d.dayDate).toISOString().split('T')[0], i + 1);
+        });
+        // Build a map of branchId → branch number (sortOrder + 1)
+        const branchNumMap = new Map<string, number>();
+        (branchesRef.current || []).forEach((b) => {
+          branchNumMap.set(b.id, b.sortOrder + 1);
+        });
+        sortedDests.forEach((dest) => {
+          const dateStr = new Date(dest.dayDate).toISOString().split('T')[0];
+          const dayNum = dateToDayNum.get(dateStr);
+          let label: string;
+          if (!dest.branchId) {
+            label = dayNum ? String(dayNum) : '?';
+          } else {
+            const branchNum = branchNumMap.get(dest.branchId) ?? 0;
+            label = `${dayNum ?? '?'}.${branchNum}`;
+          }
           const isSelected = selectedDayDestIdRef.current === dest.id;
+          const color = getBranchColor(dest.branchId);
           const destMarker = L.marker([dest.latitude!, dest.longitude!], {
             icon: L.divIcon({
               className: '',
-              html: makeLabelIconHtml(label, isSelected),
+              html: makeLabelIconHtml(label, isSelected, color),
               iconSize: [28, 28],
               iconAnchor: [14, 14],
             }),
           }).bindTooltip(dest.name, { permanent: false, direction: 'top', offset: [0, -14] });
-          destMarkersRef.current.set(dest.id, { marker: destMarker, label });
+          destMarkersRef.current.set(dest.id, { marker: destMarker, label, color });
           destMarker.addTo(group);
         });
 
@@ -937,9 +990,10 @@ export default function MapPage() {
           if (coords.length === 0) continue;
           allCoords.push(...coords);
 
-          // Visible polyline (non-interactive so the hit target handles clicks)
+          // Visible polyline — colored per branch
+          const segColor = getBranchColor(seg.branchId);
           L.polyline(coords, {
-            color: '#e06319', // primary-600
+            color: segColor,
             weight: 4,
             opacity: 0.85,
             interactive: false,
@@ -1263,7 +1317,7 @@ export default function MapPage() {
   const handleAiResearchArea = useCallback(async () => {
     if (!mapRef.current) return;
     setContextMenu(null);
-    statusBarRef.current?.pushStatus('AI researching visible area...');
+    statusBarRef.current?.setLoading('AI researching visible area...');
     try {
       const b = mapRef.current.getBounds();
       const sw = b.getSouthWest();
@@ -1280,10 +1334,11 @@ export default function MapPage() {
         statusBarRef.current?.pushStatus(`AI Research failed: ${data.error ?? res.status}`, JSON.stringify(data));
         return;
       }
-      const experiences = data.experiences ?? [];
+      const experiences = (data.experiences ?? []).map((e: DiscoveredExperienceMarker) => ({ ...e, aiProvider: data.aiProvider ?? 'chatgpt' }));
       setExperienceResults(experiences);
+      const providerLabel = data.aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
       statusBarRef.current?.pushStatus(
-        `AI Research: ${experiences.length} experiences${data.cached ? ' (cached)' : ''} — ${data.tokenUsage?.totalTokens ?? 0} tokens`,
+        `AI Research (${providerLabel}): ${experiences.length} experiences${data.cached ? ' (cached)' : ''} — ${data.tokenUsage?.totalTokens ?? 0} tokens`,
       );
     } catch (err) {
       console.error('[MapPage] AI area research error:', err);
@@ -1669,7 +1724,7 @@ export default function MapPage() {
       if (entry) {
         entry.marker.setIcon(L.divIcon({
           className: '',
-          html: makeLabelIconHtml(entry.label, false),
+          html: makeLabelIconHtml(entry.label, false, entry.color),
           iconSize: [28, 28],
           iconAnchor: [14, 14],
         }));
@@ -1681,7 +1736,7 @@ export default function MapPage() {
       if (entry) {
         entry.marker.setIcon(L.divIcon({
           className: '',
-          html: makeLabelIconHtml(entry.label, true),
+          html: makeLabelIconHtml(entry.label, true, entry.color),
           iconSize: [28, 28],
           iconAnchor: [14, 14],
         }));
@@ -2550,8 +2605,8 @@ export default function MapPage() {
               }}
               badge={
                 <>
-                  <span className={`inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border ${PROVIDER_BADGE_STYLES.chatgpt}`}>
-                    AI Research
+                  <span className={`inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border ${PROVIDER_BADGE_STYLES[selectedExperience.aiProvider ?? 'chatgpt']}`}>
+                    {selectedExperience.aiProvider === 'claude' ? 'AI Research (Claude)' : 'AI Research (ChatGPT)'}
                   </span>
                   {' '}
                   <span
@@ -2716,6 +2771,7 @@ export default function MapPage() {
                 pois={tripPois}
                 initialSelectedDayId={restoredRef.current?.selectedDayDestId}
                 onStatusMessage={(text, detail) => statusBarRef.current?.pushStatus(text, detail)}
+                onSetLoading={(text) => statusBarRef.current?.setLoading(text)}
                 onTripDatesChange={(start, stop) => { currentTripDatesRef.current = { start, stop }; }}
                 onExperiencesDiscovered={setExperienceResults}
                 onPoiClick={handleSidebarPoiClick}

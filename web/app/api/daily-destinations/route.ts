@@ -122,6 +122,7 @@ export async function POST(request: NextRequest) {
         latitude: data.latitude ?? null,
         longitude: data.longitude ?? null,
         notes: data.notes ?? null,
+        branchId: data.branchId ?? null,
       },
     });
 

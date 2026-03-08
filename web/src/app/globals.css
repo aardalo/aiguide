@@ -416,3 +416,17 @@ select:focus-visible {
   outline: 2px solid var(--color-primary-500);
   outline-offset: 2px;
 }
+
+/* Status bar loading dots */
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--color-primary-500);
+  animation: statusPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes statusPulse {
+  0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.1); }
+}

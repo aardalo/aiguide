@@ -27,6 +27,11 @@ export const SETTING_KEYS = {
   TRIPADVISOR_API_KEY: 'tripadvisor.api_key',
   FOURSQUARE_API_KEY: 'foursquare.api_key',
   OPENAI_API_KEY: 'openai.api_key',
+  ANTHROPIC_API_KEY: 'anthropic.api_key',
+  AI_PROVIDER: 'ai.provider',
+  AI_MODEL_CHATGPT: 'ai.model.chatgpt',
+  AI_MODEL_CLAUDE: 'ai.model.claude',
+  AI_CLAUDE_BATCH: 'ai.claude_batch',
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];

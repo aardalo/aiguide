@@ -49,10 +49,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { tripId } = validation.data;
+    const { tripId, branchId } = validation.data;
+    const effectiveBranchId = branchId ?? null;
 
     // Load destinations, home setting, and trip preferences in parallel
-    const [destinations, homeName, homeLatStr, homeLngStr, trip] = await Promise.all([
+    const [allDestinations, homeName, homeLatStr, homeLngStr, trip] = await Promise.all([
       prisma.dailyDestination.findMany({ where: { tripId }, orderBy: { dayDate: 'asc' } }),
       getSetting(SETTING_KEYS.HOME_NAME),
       getSetting(SETTING_KEYS.HOME_LATITUDE),
@@ -64,8 +65,14 @@ export async function POST(request: NextRequest) {
       ? JSON.parse(trip.routingPreferences)
       : undefined;
 
+    // Separate main-branch and target-branch destinations
+    const mainDests = allDestinations.filter((d) => d.branchId === null);
+    const targetDests = effectiveBranchId
+      ? allDestinations.filter((d) => d.branchId === effectiveBranchId)
+      : mainDests;
+
     // Filter to only destinations that have coordinates
-    const withCoords = destinations.filter(
+    const withCoords = targetDests.filter(
       (d) => d.latitude !== null && d.longitude !== null,
     );
 
@@ -84,7 +91,38 @@ export async function POST(request: NextRequest) {
       dayDate: d.dayDate,
     }));
 
-    const allPoints: RoutePoint[] = homePoint ? [homePoint, ...destPoints] : destPoints;
+    // For branches: find entry point (main-branch day before) and exit point (main-branch day after)
+    let entryPoint: RoutePoint | null = null;
+    let exitPoint: RoutePoint | null = null;
+    if (effectiveBranchId && destPoints.length > 0) {
+      const firstBranchDate = destPoints[0].dayDate!;
+      const lastBranchDate = destPoints[destPoints.length - 1].dayDate!;
+      const mainWithCoords = mainDests.filter((d) => d.latitude !== null && d.longitude !== null);
+
+      // Entry: last main-branch dest with date < first branch date
+      const entryDest = [...mainWithCoords].reverse().find((d) => d.dayDate < firstBranchDate);
+      if (entryDest) {
+        entryPoint = { id: entryDest.id, name: entryDest.name, latitude: entryDest.latitude!, longitude: entryDest.longitude!, dayDate: entryDest.dayDate };
+      }
+
+      // Exit: first main-branch dest with date > last branch date
+      const exitDest = mainWithCoords.find((d) => d.dayDate > lastBranchDate);
+      if (exitDest) {
+        exitPoint = { id: exitDest.id, name: exitDest.name, latitude: exitDest.latitude!, longitude: exitDest.longitude!, dayDate: exitDest.dayDate };
+      }
+    }
+
+    // Build the full point list
+    let allPoints: RoutePoint[];
+    if (effectiveBranchId) {
+      allPoints = [
+        ...(entryPoint ? [entryPoint] : homePoint ? [homePoint] : []),
+        ...destPoints,
+        ...(exitPoint ? [exitPoint] : []),
+      ];
+    } else {
+      allPoints = homePoint ? [homePoint, ...destPoints] : destPoints;
+    }
 
     if (allPoints.length < 2) {
       return NextResponse.json(
@@ -122,8 +160,11 @@ export async function POST(request: NextRequest) {
       try {
         // Load any manual via-points already saved for this segment so they are
         // preserved across re-routes (e.g. after a destination coordinate change).
+        // For branch segments, the dayDate is the branch dest's date (not the entry/exit point)
+        const segDayDate = to.dayDate;
+
         const existingSegment = await prisma.routeSegment.findFirst({
-          where: { tripId, dayDate: to.dayDate },
+          where: { tripId, dayDate: segDayDate, branchId: effectiveBranchId },
           include: { waypoints: { where: { isManual: true }, orderBy: { sequenceIndex: 'asc' } } },
         });
         const manualWaypoints = existingSegment?.waypoints ?? [];
@@ -139,33 +180,32 @@ export async function POST(request: NextRequest) {
 
         const leg = result.legs[0];
 
-        // Upsert — keyed on (tripId, dayDate) using the "to" destination's date
-        const segment = await prisma.routeSegment.upsert({
-          where: {
-            tripId_dayDate: {
+        const segData = {
+          fromDestinationId: from.id,
+          toDestinationId: to.id,
+          provider: provider.id,
+          distanceMeters: leg.distanceMeters,
+          durationSeconds: leg.durationSeconds,
+          encodedPolyline: leg.encodedPolyline ?? null,
+        };
+
+        // Find-then-create/update (partial unique indexes don't support Prisma upsert)
+        let segment;
+        if (existingSegment) {
+          segment = await prisma.routeSegment.update({
+            where: { id: existingSegment.id },
+            data: segData,
+          });
+        } else {
+          segment = await prisma.routeSegment.create({
+            data: {
               tripId,
-              dayDate: to.dayDate,
+              dayDate: segDayDate,
+              branchId: effectiveBranchId,
+              ...segData,
             },
-          },
-          update: {
-            fromDestinationId: from.id,
-            toDestinationId: to.id,
-            provider: provider.id,
-            distanceMeters: leg.distanceMeters,
-            durationSeconds: leg.durationSeconds,
-            encodedPolyline: leg.encodedPolyline ?? null,
-          },
-          create: {
-            tripId,
-            dayDate: to.dayDate,
-            fromDestinationId: from.id,
-            toDestinationId: to.id,
-            provider: provider.id,
-            distanceMeters: leg.distanceMeters,
-            durationSeconds: leg.durationSeconds,
-            encodedPolyline: leg.encodedPolyline ?? null,
-          },
-        });
+          });
+        }
 
         // Regenerate auto waypoints every 50 km along the new polyline (STORY-006).
         // Only delete auto-generated waypoints; manual via-points are preserved.

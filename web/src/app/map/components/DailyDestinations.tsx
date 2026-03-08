@@ -9,9 +9,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import type { PlaceResult } from '@/lib/schemas/geocoding';
-import type { TripResponse, DailyDestinationResponse, DailyPoiResponse } from '@/lib/schemas/trip';
+import type { TripResponse, DailyDestinationResponse, DailyPoiResponse, BranchResponse } from '@/lib/schemas/trip';
 import type { RouteSegmentResponse } from '@/lib/schemas/routing';
 import { decodePolyline } from '@/lib/polyline';
+import { MAIN_BRANCH_COLOR } from '@/lib/branches';
 
 interface DailyDestinationsProps {
   trip: TripResponse;
@@ -50,6 +51,7 @@ interface DailyDestinationsProps {
 export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId, onPoiClick, onDestinationClick }: DailyDestinationsProps) {
   const [destinations, setDestinations] = useState<DailyDestinationResponse[]>([]);
   const [segments, setSegments] = useState<RouteSegmentResponse[]>([]);
+  const [branches, setBranches] = useState<BranchResponse[]>([]);
   const [home, setHome] = useState<{ name: string; latitude: number; longitude: number } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingRoutes, setIsGeneratingRoutes] = useState(false);
@@ -58,6 +60,9 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
   const [showAddForm, setShowAddForm] = useState(false);
   const [addForDate, setAddForDate] = useState<string | null>(null);
   const [editingDestination, setEditingDestination] = useState<DailyDestinationResponse | null>(null);
+  const [creatingBranchForDate, setCreatingBranchForDate] = useState<string | null>(null);
+  // 0 = main route, 1+ = branch index in branches array
+  const [activeBranchIndex, setActiveBranchIndex] = useState(0);
   // 'home' | destination.id | null — tracks which day badge is highlighted in the sidebar
   const [selectedDayId, setSelectedDayId] = useState<string | null>(initialSelectedDayId ?? null);
 
@@ -83,27 +88,194 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
     }
   };
 
-  // Generate route segments after destination changes
+  // Fetch branches for this trip
+  const fetchBranches = async (): Promise<BranchResponse[]> => {
+    try {
+      const res = await fetch(`/api/branches?tripId=${trip.id}`);
+      if (res.ok) {
+        const data: BranchResponse[] = await res.json();
+        setBranches(data);
+        return data;
+      }
+    } catch (err) {
+      console.error('[DailyDestinations] Error fetching branches:', err);
+    }
+    return [];
+  };
+
+  // Create a new branch for a specific day
+  const handleCreateBranch = async (dateStr: string) => {
+    setCreatingBranchForDate(dateStr);
+    try {
+      const res = await fetch('/api/branches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tripId: trip.id, dayDate: dateStr }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        console.error('[DailyDestinations] Create branch failed:', data.error);
+        return;
+      }
+      const updatedBranches = await fetchBranches();
+      await fetchDestinations();
+      // Switch view to the newly created branch (last in the list)
+      setActiveBranchIndex(updatedBranches.length);
+    } catch (err) {
+      console.error('[DailyDestinations] Create branch error:', err);
+    } finally {
+      setCreatingBranchForDate(null);
+    }
+  };
+
+  // Delete a branch
+  const handleDeleteBranch = async (branchId: string) => {
+    if (!confirm('Delete this branch and all its destinations/routes?')) return;
+    try {
+      const res = await fetch(`/api/branches/${branchId}`, { method: 'DELETE' });
+      if (!res.ok) {
+        console.error('[DailyDestinations] Delete branch failed');
+        return;
+      }
+      await fetchBranches();
+      await fetchDestinations();
+      await generateRoutes();
+    } catch (err) {
+      console.error('[DailyDestinations] Delete branch error:', err);
+    }
+  };
+
+  // Move a day up (earlier) or down (later) to an adjacent empty slot
+  const [movingDayId, setMovingDayId] = useState<string | null>(null);
+  const handleMoveDay = async (destId: string, direction: 'up' | 'down') => {
+    const dest = destinations.find((d) => d.id === destId);
+    if (!dest) return;
+
+    const branchId = dest.branchId ?? null;
+    const currentDateStr = new Date(dest.dayDate).toISOString().split('T')[0];
+    const currentIdx = tripDates.findIndex(
+      (d) => d.toISOString().split('T')[0] === currentDateStr,
+    );
+    const targetIdx = direction === 'up' ? currentIdx - 1 : currentIdx + 1;
+    if (targetIdx < 0 || targetIdx >= tripDates.length) return;
+
+    const targetDate = tripDates[targetIdx];
+    const targetDateStr = targetDate.toISOString().split('T')[0];
+
+    // Check target is empty for this branch (null branchId = main branch)
+    const occupied = destinations.some((d) => {
+      const dStr = new Date(d.dayDate).toISOString().split('T')[0];
+      return dStr === targetDateStr && (d.branchId ?? null) === branchId;
+    });
+    if (occupied) return;
+
+    setMovingDayId(destId);
+    try {
+      // Check for existing route segments connected to this day in this branch
+      const connectedSegs = segments.filter((s) => {
+        const segDate = new Date(s.dayDate).toISOString().split('T')[0];
+        return (s.branchId ?? null) === branchId && segDate === currentDateStr;
+      });
+      // Also check the day after (segment whose dayDate = day after current, pointing TO next day FROM this day)
+      const nextIdx = currentIdx + 1;
+      if (nextIdx < tripDates.length) {
+        const nextDateStr = tripDates[nextIdx].toISOString().split('T')[0];
+        const nextSeg = segments.find((s) => {
+          const segDate = new Date(s.dayDate).toISOString().split('T')[0];
+          return (s.branchId ?? null) === branchId && segDate === nextDateStr;
+        });
+        if (nextSeg && !connectedSegs.includes(nextSeg)) connectedSegs.push(nextSeg);
+      }
+
+      if (connectedSegs.length > 0) {
+        if (!confirm(`This will remove ${connectedSegs.length} route segment(s) linked to this day. Continue?`)) {
+          setMovingDayId(null);
+          return;
+        }
+      }
+
+      // Move the destination to the new date
+      const patchRes = await fetch(`/api/daily-destinations/${destId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dayDate: targetDateStr }),
+      });
+      if (!patchRes.ok) {
+        console.error('[DailyDestinations] Move day failed');
+        setMovingDayId(null);
+        return;
+      }
+
+      // Check if there are adjacent days at the new position in the same branch
+      const branchDests = destinations.filter(
+        (d) => (d.branchId ?? null) === branchId && d.id !== destId && d.latitude != null,
+      );
+      const branchDateStrs = new Set(
+        branchDests.map((d) => new Date(d.dayDate).toISOString().split('T')[0]),
+      );
+      const hasPrev = targetIdx > 0 && branchDateStrs.has(tripDates[targetIdx - 1].toISOString().split('T')[0]);
+      const hasNext = targetIdx < tripDates.length - 1 && branchDateStrs.has(tripDates[targetIdx + 1].toISOString().split('T')[0]);
+
+      let shouldRegenerate = false;
+      if (hasPrev || hasNext) {
+        const parts: string[] = [];
+        if (hasPrev) parts.push('the day before');
+        if (hasNext) parts.push('the day after');
+        shouldRegenerate = confirm(`There are days ${parts.join(' and ')} the new position. Generate route links?`);
+      }
+
+      await fetchDestinations();
+      if (shouldRegenerate) {
+        await generateRoutes();
+      } else if (connectedSegs.length > 0) {
+        // Regenerate to clean up stale segments
+        await generateRoutes();
+      }
+    } catch (err) {
+      console.error('[DailyDestinations] Move day error:', err);
+    } finally {
+      setMovingDayId(null);
+    }
+  };
+
+  // Generate route segments after destination changes (main + all branches)
   const generateRoutes = async () => {
     setIsGeneratingRoutes(true);
     setRouteError(null);
     try {
-      const response = await fetch('/api/route-segments', {
+      // Generate main-branch routes
+      const mainRes = await fetch('/api/route-segments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tripId: trip.id }),
       });
-      const data = await response.json();
-      if (!response.ok && response.status !== 207) {
-        // Suppress the expected "not enough destinations yet" case
-        if (data.code !== 'insufficient_destinations') {
-          setRouteError(data.error ?? 'Failed to generate routes');
-        }
-        return;
+      const mainData = await mainRes.json();
+      let allSegments: RouteSegmentResponse[] = mainData.segments ?? [];
+      const errors: string[] = mainData.errors ?? [];
+
+      if (!mainRes.ok && mainRes.status !== 207 && mainData.code !== 'insufficient_destinations') {
+        setRouteError(mainData.error ?? 'Failed to generate routes');
       }
-      if (data.segments) setSegments(data.segments);
-      if (data.errors?.length) {
-        setRouteError(`Some segments failed: ${data.errors.join('; ')}`);
+
+      // Generate routes for each branch
+      for (const branch of branches) {
+        try {
+          const branchRes = await fetch('/api/route-segments', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tripId: trip.id, branchId: branch.id }),
+          });
+          const branchData = await branchRes.json();
+          if (branchData.segments) allSegments = [...allSegments, ...branchData.segments];
+          if (branchData.errors?.length) errors.push(...branchData.errors);
+        } catch {
+          // Silently skip failed branch route generation
+        }
+      }
+
+      setSegments(allSegments);
+      if (errors.length) {
+        setRouteError(`Some segments failed: ${errors.join('; ')}`);
       }
     } catch (err) {
       console.error('[DailyDestinations] Error generating routes:', err);
@@ -119,10 +291,11 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
       setIsLoading(true);
       setError(null);
       try {
-        const [destsRes, segsRes, settingsRes] = await Promise.all([
+        const [destsRes, segsRes, settingsRes, branchesRes] = await Promise.all([
           fetch(`/api/daily-destinations?tripId=${trip.id}`),
           fetch(`/api/route-segments?tripId=${trip.id}`),
           fetch('/api/settings'),
+          fetch(`/api/branches?tripId=${trip.id}`),
         ]);
 
         if (!destsRes.ok) throw new Error('Failed to fetch daily destinations');
@@ -133,8 +306,11 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
           ? await settingsRes.json()
           : [];
 
+        const branchData: BranchResponse[] = branchesRes.ok ? await branchesRes.json() : [];
+
         setDestinations(dests);
         if (Array.isArray(segs)) setSegments(segs);
+        setBranches(branchData);
 
         const sm = Object.fromEntries(settingsRows.map((r) => [r.key, r.value]));
         if (sm['home.name'] && sm['home.latitude'] && sm['home.longitude']) {
@@ -294,27 +470,29 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
     });
   };
 
-  // Get destination for a specific date
+  const tripDates = getTripDates();
+
+  // Get main-branch destination for a specific date (branchId is null)
   const getDestinationForDate = (date: Date) => {
     const dateStr = date.toISOString().split('T')[0];
     return destinations.find((d) => {
       const destDateStr = new Date(d.dayDate).toISOString().split('T')[0];
-      return destDateStr === dateStr;
+      return destDateStr === dateStr && !d.branchId;
     });
   };
 
-  // Get POIs whose dayDate matches the given date
+  // Get POIs whose dayDate matches the given date (main branch only)
   const getPoisForDate = (date: Date): DailyPoiResponse[] => {
     const dateStr = date.toISOString().split('T')[0];
-    return pois.filter((p) => new Date(p.dayDate).toISOString().split('T')[0] === dateStr);
+    return pois.filter((p) => new Date(p.dayDate).toISOString().split('T')[0] === dateStr && !p.branchId);
   };
 
-  // Get route segment whose "to" date matches the given date
+  // Get main-branch route segment whose "to" date matches the given date
   const getSegmentForDate = (date: Date) => {
     const dateStr = date.toISOString().split('T')[0];
     return segments.find((s) => {
       const segDateStr = new Date(s.dayDate).toISOString().split('T')[0];
-      return segDateStr === dateStr;
+      return segDateStr === dateStr && !s.branchId;
     });
   };
 
@@ -343,7 +521,131 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
     return `${m}m`;
   };
 
-  const tripDates = getTripDates();
+  // Branch navigation
+  const activeBranch = activeBranchIndex > 0 ? branches[activeBranchIndex - 1] : null;
+  const branchCount = branches.length + 1; // +1 for main
+
+  const navigateBranch = (delta: number) => {
+    setActiveBranchIndex((prev) => {
+      const next = prev + delta;
+      if (next < 0) return branchCount - 1;
+      if (next >= branchCount) return 0;
+      return next;
+    });
+  };
+
+  // Compute visible days based on active branch
+  type VisibleDay = {
+    date: Date;
+    dayNumber: number;       // 1-based index in the full trip
+    dayLabel: string;        // e.g. "1" for main, "1.1" for branch 1 day 1
+    destination: DailyDestinationResponse | undefined;
+    segment: RouteSegmentResponse | undefined;
+    dayPois: DailyPoiResponse[];
+    isLinked: boolean;       // true = context day from another branch
+    cardColor: string;       // border/accent color for the card
+  };
+
+  const visibleDays: VisibleDay[] = (() => {
+    if (!activeBranch) {
+      // Main route: show all trip dates with main-branch data
+      return tripDates.map((date, i) => ({
+        date,
+        dayNumber: i + 1,
+        dayLabel: String(i + 1),
+        destination: getDestinationForDate(date),
+        segment: getSegmentForDate(date),
+        dayPois: getPoisForDate(date),
+        isLinked: false,
+        cardColor: MAIN_BRANCH_COLOR,
+      }));
+    }
+
+    // Branch view: find branch dates, plus linked entry/exit from main
+    const branchId = activeBranch.id;
+    const branchDests = destinations.filter((d) => d.branchId === branchId);
+    const branchDateStrs = new Set(
+      branchDests.map((d) => new Date(d.dayDate).toISOString().split('T')[0]),
+    );
+
+    if (branchDateStrs.size === 0) return [];
+
+    const sortedBranchDates = [...branchDateStrs].sort();
+    const firstBranchDate = sortedBranchDates[0];
+    const lastBranchDate = sortedBranchDates[sortedBranchDates.length - 1];
+
+    const days: VisibleDay[] = [];
+
+    // Entry point: last main-branch day before the branch starts
+    for (let i = tripDates.length - 1; i >= 0; i--) {
+      const dateStr = tripDates[i].toISOString().split('T')[0];
+      if (dateStr < firstBranchDate) {
+        const mainDest = getDestinationForDate(tripDates[i]);
+        if (mainDest) {
+          days.push({
+            date: tripDates[i],
+            dayNumber: i + 1,
+            dayLabel: String(i + 1),
+            destination: mainDest,
+            segment: getSegmentForDate(tripDates[i]),
+            dayPois: getPoisForDate(tripDates[i]),
+            isLinked: true,
+            cardColor: MAIN_BRANCH_COLOR,
+          });
+        }
+        break;
+      }
+    }
+
+    // Branch days
+    const branchNumber = activeBranch.sortOrder + 1;
+    for (let i = 0; i < tripDates.length; i++) {
+      const dateStr = tripDates[i].toISOString().split('T')[0];
+      if (branchDateStrs.has(dateStr)) {
+        const dest = branchDests.find(
+          (d) => new Date(d.dayDate).toISOString().split('T')[0] === dateStr,
+        );
+        // Find the branch segment for this date
+        const seg = segments.find((s) => {
+          const segDate = new Date(s.dayDate).toISOString().split('T')[0];
+          return segDate === dateStr && s.branchId === branchId;
+        });
+        days.push({
+          date: tripDates[i],
+          dayNumber: i + 1,
+          dayLabel: `${i + 1}.${branchNumber}`,
+          destination: dest,
+          segment: seg,
+          dayPois: [], // branch POIs not yet supported
+          isLinked: false,
+          cardColor: activeBranch.color,
+        });
+      }
+    }
+
+    // Exit point: first main-branch day after the branch ends
+    for (let i = 0; i < tripDates.length; i++) {
+      const dateStr = tripDates[i].toISOString().split('T')[0];
+      if (dateStr > lastBranchDate) {
+        const mainDest = getDestinationForDate(tripDates[i]);
+        if (mainDest) {
+          days.push({
+            date: tripDates[i],
+            dayNumber: i + 1,
+            dayLabel: String(i + 1),
+            destination: mainDest,
+            segment: getSegmentForDate(tripDates[i]),
+            dayPois: getPoisForDate(tripDates[i]),
+            isLinked: true,
+            cardColor: MAIN_BRANCH_COLOR,
+          });
+        }
+        break;
+      }
+    }
+
+    return days;
+  })();
 
   if (isLoading && destinations.length === 0) {
     return (
@@ -356,15 +658,59 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
 
   return (
     <div className="mt-6 border-t border-neutral-200 pt-4">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-2">
         <h3 className="text-lg font-semibold text-neutral-900">Daily Itinerary</h3>
-        <button
-          onClick={() => { setAddForDate(null); setShowAddForm(true); }}
-          className="text-sm text-primary-600 hover:text-primary-800 font-medium"
-        >
-          + Add Destination
-        </button>
+        {!activeBranch && (
+          <button
+            onClick={() => { setAddForDate(null); setShowAddForm(true); }}
+            className="text-sm text-primary-600 hover:text-primary-800 font-medium"
+          >
+            + Add Destination
+          </button>
+        )}
       </div>
+
+      {/* Branch navigator */}
+      {branches.length > 0 && (
+        <div className="flex items-center justify-between mb-3 px-1">
+          <button
+            type="button"
+            onClick={() => navigateBranch(-1)}
+            className="p-1 text-neutral-500 hover:text-neutral-800 transition-colors"
+            title="Previous branch"
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 12 12" fill="currentColor"><path d="M8 1L3 6l5 5V1z" /></svg>
+          </button>
+          <div className="flex items-center gap-2">
+            <span
+              className="w-2.5 h-2.5 rounded-full"
+              style={{ backgroundColor: activeBranch?.color ?? MAIN_BRANCH_COLOR }}
+            />
+            <span className="text-sm font-medium" style={{ color: activeBranch?.color ?? MAIN_BRANCH_COLOR }}>
+              {activeBranch ? activeBranch.name : 'Main Route'}
+            </span>
+            {activeBranch && (
+              <button
+                onClick={() => handleDeleteBranch(activeBranch.id)}
+                className="p-0.5 text-neutral-400 hover:text-error-600 transition-colors"
+                title="Delete this branch"
+              >
+                <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => navigateBranch(1)}
+            className="p-1 text-neutral-500 hover:text-neutral-800 transition-colors"
+            title="Next branch"
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 12 12" fill="currentColor"><path d="M4 1l5 5-5 5V1z" /></svg>
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="mb-4 rounded-md bg-error-50 p-3 border border-error-200">
@@ -419,23 +765,41 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
         </div>
       </div>
 
-      {/* Daily destinations list */}
+      {/* Daily destinations list — driven by visibleDays */}
       <div className="space-y-0">
-        {tripDates.map((date, index) => {
-          const destination = getDestinationForDate(date);
-          const segment = getSegmentForDate(date);
-          const dayPois = getPoisForDate(date);
+        {visibleDays.map((vd, vdIndex) => {
+          const { date, dayLabel, destination, segment, dayPois, isLinked, cardColor } = vd;
           const dateStr = date.toISOString().split('T')[0];
-          const showInlineForm = (showAddForm && addForDate === dateStr) || (editingDestination && destination && editingDestination.id === destination.id);
+          const showInlineForm = !isLinked && (
+            (showAddForm && addForDate === dateStr) ||
+            (editingDestination && destination && editingDestination.id === destination.id)
+          );
+
+          // Compute move-ability for all days (main branch and branch days)
+          const isMovableDay = !isLinked && !!destination;
+          let canMoveUp = false;
+          let canMoveDown = false;
+          if (isMovableDay) {
+            const curIdx = tripDates.findIndex((d) => d.toISOString().split('T')[0] === dateStr);
+            const destBranchId = destination.branchId ?? null;
+            if (curIdx > 0) {
+              const prevStr = tripDates[curIdx - 1].toISOString().split('T')[0];
+              canMoveUp = !destinations.some((d) => new Date(d.dayDate).toISOString().split('T')[0] === prevStr && (d.branchId ?? null) === destBranchId);
+            }
+            if (curIdx < tripDates.length - 1) {
+              const nextStr = tripDates[curIdx + 1].toISOString().split('T')[0];
+              canMoveDown = !destinations.some((d) => new Date(d.dayDate).toISOString().split('T')[0] === nextStr && (d.branchId ?? null) === destBranchId);
+            }
+          }
 
           return (
-            <React.Fragment key={date.toISOString()}>
-              {/* Insert-day hover zone between rows */}
-              {index > 0 && (
+            <React.Fragment key={`${dateStr}-${isLinked ? 'linked' : 'own'}`}>
+              {/* Insert-day hover zone (between non-linked days) */}
+              {!isLinked && vdIndex > 0 && !visibleDays[vdIndex - 1].isLinked && (
                 <div className="group relative h-2 flex items-center justify-center hover:h-8 transition-all cursor-pointer"
                   onClick={() => {
-                    const prevDate = tripDates[index - 1].toISOString().split('T')[0];
-                    if (!insertingAfter) handleInsertDay(prevDate);
+                    const prevDateStr = visibleDays[vdIndex - 1].date.toISOString().split('T')[0];
+                    if (!insertingAfter) handleInsertDay(prevDateStr);
                   }}
                 >
                   <div className="absolute inset-x-4 h-px bg-transparent group-hover:bg-primary-300 transition-colors" />
@@ -445,184 +809,254 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                     className="relative z-10 hidden group-hover:flex items-center justify-center w-6 h-6 rounded-full bg-primary-100 hover:bg-primary-200 text-primary-600 text-sm font-bold border border-primary-300 shadow-sm transition-all disabled:opacity-50"
                     title="Insert a day here"
                   >
-                    {insertingAfter === tripDates[index - 1].toISOString().split('T')[0] ? (
+                    {insertingAfter === visibleDays[vdIndex - 1].date.toISOString().split('T')[0] ? (
                       <span className="inline-block w-3 h-3 border-2 border-primary-600 border-t-transparent rounded-full animate-spin" />
                     ) : '+'}
                   </button>
                 </div>
               )}
-            <div
-              className="relative p-3 bg-neutral-50 rounded-lg border border-neutral-200 hover:bg-neutral-100 transition-colors group/day"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3 flex-1">
-                  <div className="flex-shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!onFitPoints) return;
-                        const pts = getSegmentPoints(segment, destination);
-                        if (pts.length > 0) {
-                          onFitPoints(pts);
-                          const selId = destination?.id ?? null;
-                          setSelectedDayId(selId);
-                          onDaySelect?.(selId);
-                        }
-                      }}
-                      className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-colors ${onFitPoints && (segment || destination?.latitude != null) ? 'cursor-pointer' : 'cursor-default'} ${destination?.id && selectedDayId === destination.id ? 'bg-primary-600 text-white' : 'bg-primary-100 text-primary-600 hover:bg-primary-200'}`}
-                      title={segment || destination?.latitude != null ? 'Zoom to this day' : undefined}
-                    >
-                      {index + 1}
-                    </button>
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-neutral-900">
-                      {formatDate(date)}
-                    </p>
-                    {destination ? (
-                      <div className="mt-1">
-                        <p
-                          className={`text-sm text-neutral-700 ${destination.latitude != null && destination.longitude != null && onDestinationClick ? 'cursor-pointer hover:text-primary-600' : ''}`}
-                          onClick={() => {
-                            if (destination.latitude != null && destination.longitude != null && onDestinationClick) {
-                              onDestinationClick(destination);
-                            }
-                          }}
-                        >
-                          {destination.name}
-                          {destination.municipality && (
-                            <span className="text-neutral-400"> ({destination.municipality})</span>
-                          )}
-                        </p>
-                        {destination.notes && (
-                          <p className="text-xs text-neutral-500 mt-0.5">{destination.notes}</p>
+
+              {/* Chain link connector between branch days */}
+              {activeBranch && vdIndex > 0 && !isLinked && !visibleDays[vdIndex - 1].isLinked && (
+                <div className="flex items-center justify-center h-5">
+                  <svg className="h-3.5 w-3.5" style={{ color: cardColor }} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                  </svg>
+                </div>
+              )}
+
+              {/* Linked-day connector arrow (entry → branch or branch → exit) */}
+              {activeBranch && vdIndex > 0 && (isLinked !== visibleDays[vdIndex - 1].isLinked) && (
+                <div className="flex items-center justify-center h-5">
+                  <svg className="h-3 w-3 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                  </svg>
+                </div>
+              )}
+
+              <div
+                className={`relative p-3 rounded-lg border transition-colors group/day ${isLinked ? 'bg-neutral-50/60 border-neutral-200 opacity-70' : 'bg-neutral-50 border-neutral-200 hover:bg-neutral-100'}`}
+                style={!isLinked && activeBranch ? { borderLeftWidth: '4px', borderLeftColor: cardColor } : undefined}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3 flex-1">
+                    <div className="flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!onFitPoints) return;
+                          const pts = getSegmentPoints(segment, destination);
+                          if (pts.length > 0) {
+                            onFitPoints(pts);
+                            const selId = destination?.id ?? null;
+                            setSelectedDayId(selId);
+                            onDaySelect?.(selId);
+                          }
+                        }}
+                        className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold transition-colors text-white ${dayLabel.length > 2 ? 'text-[10px]' : 'text-sm'}`}
+                        style={{ backgroundColor: cardColor }}
+                        title={segment || destination?.latitude != null ? 'Zoom to this day' : undefined}
+                      >
+                        {dayLabel}
+                      </button>
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm font-medium text-neutral-900">
+                        {formatDate(date)}
+                        {isLinked && (
+                          <span className="ml-1.5 text-xs font-normal text-neutral-400">(main route)</span>
                         )}
-                        {destination.latitude && destination.longitude && (
-                          <p className="text-xs text-neutral-400 mt-0.5">
-                            {destination.latitude.toFixed(4)}, {destination.longitude.toFixed(4)}
+                      </p>
+                      {destination ? (
+                        <div className="mt-1">
+                          <p
+                            className={`text-sm text-neutral-700 ${destination.latitude != null && destination.longitude != null && onDestinationClick ? 'cursor-pointer hover:text-primary-600' : ''}`}
+                            onClick={() => {
+                              if (destination.latitude != null && destination.longitude != null && onDestinationClick) {
+                                onDestinationClick(destination);
+                              }
+                            }}
+                          >
+                            {destination.name}
+                            {destination.municipality && (
+                              <span className="text-neutral-400"> ({destination.municipality})</span>
+                            )}
                           </p>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-neutral-400 italic">No destination set</p>
-                    )}
+                          {destination.notes && (
+                            <p className="text-xs text-neutral-500 mt-0.5">{destination.notes}</p>
+                          )}
+                          {destination.latitude && destination.longitude && (
+                            <p className="text-xs text-neutral-400 mt-0.5">
+                              {destination.latitude.toFixed(4)}, {destination.longitude.toFixed(4)}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-neutral-400 italic">No destination set</p>
+                      )}
+                    </div>
                   </div>
+
+                  {/* Edit/delete/move buttons (not on linked context days) */}
+                  {!isLinked && destination && (
+                    <div className="flex items-center gap-1">
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => setEditingDestination(destination)}
+                          className="p-1 text-neutral-400 hover:text-primary-600 transition-colors"
+                          title="Edit destination"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={() => handleDelete(destination.id)}
+                          className="p-1 text-neutral-400 hover:text-error-600 transition-colors"
+                          title="Delete destination"
+                        >
+                          <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
+                      {/* Move up/down buttons */}
+                      {isMovableDay && (
+                        <div className="flex flex-col items-center ml-0.5">
+                          <button
+                            onClick={() => handleMoveDay(destination.id, 'up')}
+                            disabled={!canMoveUp || !!movingDayId}
+                            className="p-0.5 text-neutral-400 hover:text-primary-600 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                            title={canMoveUp ? 'Move to earlier day' : 'No empty slot'}
+                          >
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" />
+                            </svg>
+                          </button>
+                          <button
+                            onClick={() => handleMoveDay(destination.id, 'down')}
+                            disabled={!canMoveDown || !!movingDayId}
+                            className="p-0.5 text-neutral-400 hover:text-primary-600 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                            title={canMoveDown ? 'Move to later day' : 'No empty slot'}
+                          >
+                            <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                            </svg>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!isLinked && !destination && (
+                    <button
+                      onClick={() => {
+                        setAddForDate(dateStr);
+                        setShowAddForm(true);
+                      }}
+                      className="p-1 text-neutral-400 hover:text-primary-600 transition-colors"
+                      title="Add destination"
+                    >
+                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
 
-                {destination && (
-                  <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => setEditingDestination(destination)}
-                      className="p-1 text-neutral-400 hover:text-primary-600 transition-colors"
-                      title="Edit destination"
-                    >
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                      </svg>
-                    </button>
-                    <button
-                      onClick={() => handleDelete(destination.id)}
-                      className="p-1 text-neutral-400 hover:text-error-600 transition-colors"
-                      title="Delete destination"
-                    >
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
+                {/* Route segment info */}
+                {segment && (
+                  <div className="mt-2 ml-11 flex items-center gap-3 text-xs text-neutral-500">
+                    <span>{formatDistance(segment.distanceMeters)}</span>
+                    <span>·</span>
+                    <span>{formatDuration(segment.durationSeconds)}</span>
+                    <span className="text-neutral-400">via {segment.provider}</span>
                   </div>
                 )}
 
-                {!destination && (
+                {/* Parkups + POIs */}
+                {dayPois.length > 0 && (() => {
+                  const parkups = dayPois.filter((p) => p.category === 'parkup');
+                  const regularPois = dayPois.filter((p) => p.category !== 'parkup');
+                  return (
+                    <div className="mt-1.5 ml-11 flex flex-col gap-0.5">
+                      {parkups.map((p) => (
+                        <div
+                          key={p.id}
+                          className={`flex items-center gap-1.5 text-xs text-emerald-700 ${onPoiClick ? 'cursor-pointer hover:text-emerald-900' : ''}`}
+                          onClick={() => onPoiClick?.(p)}
+                        >
+                          <span className="shrink-0">🚐</span>
+                          <span className="truncate">{p.name}</span>
+                        </div>
+                      ))}
+                      {regularPois.map((p) => (
+                        <div
+                          key={p.id}
+                          className={`flex items-center gap-1.5 text-xs text-violet-700 ${onPoiClick ? 'cursor-pointer hover:text-violet-900' : ''}`}
+                          onClick={() => onPoiClick?.(p)}
+                        >
+                          <span className="shrink-0">📌</span>
+                          <span className="truncate">{p.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                {/* Inline add/edit form */}
+                {showInlineForm && (
+                  <div className="mt-2">
+                    <DestinationForm
+                      trip={trip}
+                      destination={editingDestination && destination && editingDestination.id === destination.id ? editingDestination : null}
+                      initialDate={addForDate}
+                      onSuccess={handleFormSuccess}
+                      onCancel={() => {
+                        setShowAddForm(false);
+                        setAddForDate(null);
+                        setEditingDestination(null);
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* Remove day button (non-linked days only) */}
+                {!isLinked && tripDates.length > 1 && (
                   <button
+                    type="button"
                     onClick={() => {
-                      setAddForDate(date.toISOString().split('T')[0]);
-                      setShowAddForm(true);
+                      if (!removingDate) handleRemoveDay(dateStr);
                     }}
-                    className="p-1 text-neutral-400 hover:text-primary-600 transition-colors"
-                    title="Add destination"
+                    disabled={!!removingDate}
+                    className="absolute bottom-1.5 right-1.5 hidden group-hover/day:flex items-center justify-center w-5 h-5 rounded-full text-neutral-400 hover:text-error-600 hover:bg-error-50 text-xs transition-all disabled:opacity-50"
+                    title="Remove this day"
                   >
-                    <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-                    </svg>
+                    {removingDate === dateStr ? (
+                      <span className="inline-block w-3 h-3 border-2 border-error-600 border-t-transparent rounded-full animate-spin" />
+                    ) : '×'}
+                  </button>
+                )}
+
+                {/* Branch creation button (on hover, any non-linked day) */}
+                {!isLinked && (
+                  <button
+                    type="button"
+                    onClick={() => handleCreateBranch(dateStr)}
+                    disabled={!!creatingBranchForDate}
+                    className="absolute top-1/2 -translate-y-1/2 -right-3 hidden group-hover/day:flex items-center justify-center w-6 h-6 rounded-full bg-violet-100 hover:bg-violet-200 text-violet-600 text-sm font-bold border border-violet-300 shadow-sm transition-all disabled:opacity-50 z-10"
+                    title="Create alternative branch"
+                  >
+                    {creatingBranchForDate === dateStr ? (
+                      <span className="inline-block w-3 h-3 border-2 border-violet-600 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                      </svg>
+                    )}
                   </button>
                 )}
               </div>
-
-              {/* Route segment info (distance + duration to this overnight stop) */}
-              {segment && (
-                <div className="mt-2 ml-11 flex items-center gap-3 text-xs text-neutral-500">
-                  <span>{formatDistance(segment.distanceMeters)}</span>
-                  <span>·</span>
-                  <span>{formatDuration(segment.durationSeconds)}</span>
-                  <span className="text-neutral-400">via {segment.provider}</span>
-                </div>
-              )}
-
-              {/* Parkups + POIs for this day */}
-              {dayPois.length > 0 && (() => {
-                const parkups = dayPois.filter((p) => p.category === 'parkup');
-                const regularPois = dayPois.filter((p) => p.category !== 'parkup');
-                return (
-                  <div className="mt-1.5 ml-11 flex flex-col gap-0.5">
-                    {parkups.map((p) => (
-                      <div
-                        key={p.id}
-                        className={`flex items-center gap-1.5 text-xs text-emerald-700 ${onPoiClick ? 'cursor-pointer hover:text-emerald-900' : ''}`}
-                        onClick={() => onPoiClick?.(p)}
-                      >
-                        <span className="shrink-0">🚐</span>
-                        <span className="truncate">{p.name}</span>
-                      </div>
-                    ))}
-                    {regularPois.map((p) => (
-                      <div
-                        key={p.id}
-                        className={`flex items-center gap-1.5 text-xs text-violet-700 ${onPoiClick ? 'cursor-pointer hover:text-violet-900' : ''}`}
-                        onClick={() => onPoiClick?.(p)}
-                      >
-                        <span className="shrink-0">📌</span>
-                        <span className="truncate">{p.name}</span>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-
-              {/* Inline add/edit form for this day */}
-              {showInlineForm && (
-                <div className="mt-2">
-                  <DestinationForm
-                    trip={trip}
-                    destination={editingDestination && destination && editingDestination.id === destination.id ? editingDestination : null}
-                    initialDate={addForDate}
-                    onSuccess={handleFormSuccess}
-                    onCancel={() => {
-                      setShowAddForm(false);
-                      setAddForDate(null);
-                      setEditingDestination(null);
-                    }}
-                  />
-                </div>
-              )}
-
-              {/* Remove day button — lower-right, visible on hover */}
-              {tripDates.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const dateStr = date.toISOString().split('T')[0];
-                    if (!removingDate) handleRemoveDay(dateStr);
-                  }}
-                  disabled={!!removingDate}
-                  className="absolute bottom-1.5 right-1.5 hidden group-hover/day:flex items-center justify-center w-5 h-5 rounded-full text-neutral-400 hover:text-error-600 hover:bg-error-50 text-xs transition-all disabled:opacity-50"
-                  title="Remove this day"
-                >
-                  {removingDate === date.toISOString().split('T')[0] ? (
-                    <span className="inline-block w-3 h-3 border-2 border-error-600 border-t-transparent rounded-full animate-spin" />
-                  ) : '×'}
-                </button>
-              )}
-            </div>
             </React.Fragment>
           );
         })}
@@ -630,7 +1064,7 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
 
       {destinations.length === 0 && !showAddForm && (
         <p className="text-sm text-neutral-500 text-center py-4">
-          No destinations added yet. Click "Add Destination" to get started.
+          No destinations added yet. Click &quot;Add Destination&quot; to get started.
         </p>
       )}
     </div>

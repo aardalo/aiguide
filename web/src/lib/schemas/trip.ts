@@ -112,7 +112,9 @@ const dailyDestinationBaseSchema = z.object({
 /**
  * Daily destination creation schema - used for POST
  */
-export const dailyDestinationCreateSchema = dailyDestinationBaseSchema;
+export const dailyDestinationCreateSchema = dailyDestinationBaseSchema.extend({
+  branchId: z.string().cuid().nullable().optional(),
+});
 
 /**
  * Daily destination update schema - used for PATCH
@@ -135,6 +137,7 @@ export const dailyDestinationResponseSchema = z.object({
   latitude: z.number().min(-90).max(90).nullable(),
   longitude: z.number().min(-180).max(180).nullable(),
   notes: z.string().max(1000, "Notes must be 1000 characters or less").nullable(),
+  branchId: z.string().cuid().nullable().optional(),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
 });
@@ -176,6 +179,7 @@ export const dailyPoiCreateSchema = z.object({
   longitude: z.number().min(-180).max(180),
   notes: z.string().max(1000).nullable().optional(),
   category: z.enum(['poi', 'parkup']).default('poi'),
+  branchId: z.string().cuid().nullable().optional(),
 });
 
 export const dailyPoiResponseSchema = z.object({
@@ -187,12 +191,43 @@ export const dailyPoiResponseSchema = z.object({
   longitude: z.number(),
   notes: z.string().nullable(),
   category: z.string().default('poi'),
+  branchId: z.string().cuid().nullable().optional(),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
 });
 
 export type DailyPoiCreate = z.infer<typeof dailyPoiCreateSchema>;
 export type DailyPoiResponse = z.infer<typeof dailyPoiResponseSchema>;
+
+/**
+ * Branch Schemas
+ */
+
+export const branchCreateSchema = z.object({
+  tripId: z.string().cuid(),
+  name: z.string().min(1).max(100).optional(),
+  dayDate: z.string().date("Day date must be a valid date (YYYY-MM-DD)"),
+});
+
+export const branchUpdateSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/, "Must be a hex color").optional(),
+  sortOrder: z.number().int().optional(),
+});
+
+export const branchResponseSchema = z.object({
+  id: z.string().cuid(),
+  tripId: z.string().cuid(),
+  name: z.string(),
+  color: z.string(),
+  sortOrder: z.number().int(),
+  createdAt: z.date().or(z.string().datetime()),
+  updatedAt: z.date().or(z.string().datetime()),
+});
+
+export type BranchCreate = z.infer<typeof branchCreateSchema>;
+export type BranchUpdate = z.infer<typeof branchUpdateSchema>;
+export type BranchResponse = z.infer<typeof branchResponseSchema>;
 
 /**
  * Validation helper functions

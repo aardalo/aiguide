@@ -54,6 +54,8 @@ interface TripDetailProps {
   initialSelectedDayId?: string | null;
   /** Callback to push a message to the status bar. */
   onStatusMessage?: (text: string, detail?: string) => void;
+  /** Callback to show a persistent loading animation in the status bar. */
+  onSetLoading?: (text: string) => void;
   /** Callback when the trip's date range changes (e.g. after insert-day). */
   onTripDatesChange?: (startDate: string, stopDate: string) => void;
   /** Called when a POI or parkup name is clicked in the sidebar. */
@@ -74,6 +76,7 @@ interface TripDetailProps {
     estimatedDetourKm: number;
     seasonalNotes?: string;
     sources?: string[];
+    aiProvider?: 'chatgpt' | 'claude';
   }>) => void;
 }
 
@@ -90,6 +93,7 @@ export default function TripDetail({
   pois,
   initialSelectedDayId,
   onStatusMessage,
+  onSetLoading,
   onTripDatesChange,
   onPoiClick,
   onDestinationClick,
@@ -176,7 +180,7 @@ export default function TripDetail({
   const handleAiResearch = async () => {
     if (!trip) return;
     setIsResearching(true);
-    onStatusMessage?.('AI Research: analysing route...');
+    onSetLoading?.('AI Research: analysing route...');
     try {
       const res = await fetch('/api/discover-experiences', {
         method: 'POST',
@@ -198,12 +202,14 @@ export default function TripDetail({
         stars1 > 0 ? `${stars1} worth a stop` : '',
       ].filter(Boolean).join(', ');
       const cachedLabel = data.cached ? ' (cached)' : '';
+      const providerLabel = data.aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
       onStatusMessage?.(
-        `AI Research: found ${count} experiences${cachedLabel} — ${summary}`,
+        `AI Research (${providerLabel}): found ${count} experiences${cachedLabel} — ${summary}`,
         JSON.stringify(data, null, 2),
       );
       if (data.experiences?.length) {
-        onExperiencesDiscovered?.(data.experiences);
+        const aiProv = data.aiProvider ?? 'chatgpt';
+        onExperiencesDiscovered?.(data.experiences.map((e: Record<string, unknown>) => ({ ...e, aiProvider: aiProv })));
       }
     } catch (err) {
       onStatusMessage?.('AI Research failed', String(err));

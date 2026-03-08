@@ -3,36 +3,40 @@ import type { DiscoveredExperience } from './types';
 
 const CACHE_TTL_HOURS = 720; // 30 days
 
+export type AiProvider = 'chatgpt' | 'claude';
+
 /**
  * Slugify a name + country into a stable placeId.
- * e.g. "The Colosseum", "Italy" → "chatgpt:the-colosseum-italy"
+ * e.g. "The Colosseum", "Italy", "chatgpt" → "chatgpt:the-colosseum-italy"
+ * e.g. "The Colosseum", "Italy", "claude"  → "claude:the-colosseum-italy"
  */
-function makePlaceId(name: string, country: string): string {
+function makePlaceId(name: string, country: string, provider: AiProvider): string {
   const slug = `${name}-${country}`
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '');
-  return `chatgpt:${slug}`;
+  return `${provider}:${slug}`;
 }
 
 /**
- * Check Neo4j for cached discovery results matching the given query key.
+ * Check Neo4j for cached discovery results matching the given query key and provider.
  * Returns the cached experiences if the CachedSource node exists and hasn't expired.
  * Gracefully returns null if Neo4j is unavailable or cache is stale.
  */
 export async function getCachedDiscoveries(
   queryKey: string,
+  provider: AiProvider = 'chatgpt',
 ): Promise<DiscoveredExperience[] | null> {
   const session = await openSession();
   if (!session) return null;
 
   try {
     const result = await session.run(
-      `MATCH (s:CachedSource { provider: 'chatgpt', queryKey: $queryKey })
+      `MATCH (s:CachedSource { provider: $provider, queryKey: $queryKey })
        WHERE s.fetchedAt + duration({ hours: s.ttlHours }) > datetime()
        MATCH (p:Place)-[:SOURCED_FROM]->(s)
        RETURN p`,
-      { queryKey },
+      { queryKey, provider },
     );
 
     if (result.records.length === 0) return null;
@@ -69,6 +73,7 @@ export async function getCachedDiscoveries(
 export async function cacheDiscoveredExperiences(
   experiences: DiscoveredExperience[],
   queryKey: string,
+  provider: AiProvider = 'chatgpt',
 ): Promise<void> {
   if (experiences.length === 0) return;
   const session = await openSession();
@@ -77,23 +82,23 @@ export async function cacheDiscoveredExperiences(
   try {
     // Ensure the CachedSource node exists
     await session.run(
-      `MERGE (s:CachedSource { provider: 'chatgpt', queryKey: $queryKey })
+      `MERGE (s:CachedSource { provider: $provider, queryKey: $queryKey })
        SET s.fetchedAt = datetime(),
            s.ttlHours  = $ttlHours`,
-      { queryKey, ttlHours: CACHE_TTL_HOURS },
+      { queryKey, ttlHours: CACHE_TTL_HOURS, provider },
     );
 
     // Upsert each experience as a Place node
     for (const exp of experiences) {
-      const placeId = makePlaceId(exp.name, exp.country);
+      const placeId = makePlaceId(exp.name, exp.country, provider);
       await session.run(
         `MERGE (n:Place { placeId: $placeId })
          SET n.name             = $name,
              n.displayName      = $name,
              n.lat              = $lat,
              n.lon              = $lng,
-             n.type             = 'chatgpt:experience',
-             n.provider         = 'chatgpt',
+             n.type             = $type,
+             n.provider         = $provider,
              n.michelinStars    = $michelinStars,
              n.category         = $category,
              n.description      = $description,
@@ -105,13 +110,15 @@ export async function cacheDiscoveredExperiences(
              n.sources          = $sources,
              n.updatedAt        = datetime()
          WITH n
-         MATCH (s:CachedSource { provider: 'chatgpt', queryKey: $queryKey })
+         MATCH (s:CachedSource { provider: $provider, queryKey: $queryKey })
          MERGE (n)-[:SOURCED_FROM]->(s)`,
         {
           placeId,
           name: exp.name,
           lat: exp.approximateLat,
           lng: exp.approximateLng,
+          type: `${provider}:experience`,
+          provider,
           michelinStars: exp.michelinStars,
           category: exp.category,
           description: exp.description,
@@ -133,9 +140,10 @@ export async function cacheDiscoveredExperiences(
 }
 
 /**
- * Find all cached ChatGPT experiences within a corridor around the given
- * route coordinates. Used to exclude already-known places from new research.
- * Returns place names + approximate coordinates for prompt exclusion.
+ * Find all cached AI experiences (from any AI provider) within a corridor
+ * around the given route coordinates. Used to exclude already-known places
+ * from new research. Returns place names + approximate coordinates for
+ * prompt exclusion.
  */
 export async function getCachedExperiencesNearRoute(
   destinations: Array<{ lat: number; lng: number }>,
@@ -158,7 +166,7 @@ export async function getCachedExperiencesNearRoute(
 
     const result = await session.run(
       `MATCH (p:Place)
-       WHERE p.provider = 'chatgpt'
+       WHERE p.provider IN ['chatgpt', 'claude']
          AND p.lat >= $minLat AND p.lat <= $maxLat
          AND p.lon >= $minLng AND p.lon <= $maxLng
        RETURN p`,

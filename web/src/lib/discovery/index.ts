@@ -1,9 +1,11 @@
 import { prisma } from '@/lib/prisma';
 import { createHash } from 'crypto';
-import type { DiscoveredExperience, DiscoveryResult } from './types';
+import type { DiscoveredExperience, DiscoveryResult, AiProviderId } from './types';
 import { chunkRoute, buildSystemPrompt, buildUserPrompt, buildAreaUserPrompt, type BoundsArea } from './prompt';
 import { callOpenAi } from './openai';
-import { getCachedDiscoveries, getCachedExperiencesNearRoute, cacheDiscoveredExperiences } from './graph';
+import { callClaude } from './claude';
+import { callClaudeBatch } from './claude-batch';
+import { getCachedDiscoveries, getCachedExperiencesNearRoute, cacheDiscoveredExperiences, type AiProvider } from './graph';
 
 /**
  * Haversine distance in km between two lat/lng points.
@@ -66,18 +68,44 @@ function buildQueryKey(
   return createHash('sha256').update(coords).digest('hex').slice(0, 16);
 }
 
+/** Options passed through from the API route to control model and batch mode. */
+export interface DiscoveryOptions {
+  model?: string;
+  useBatch?: boolean;
+}
+
 /**
- * Discover must-see experiences along a trip's route using ChatGPT.
+ * Call the appropriate AI provider for discovery.
+ */
+async function callAiProvider(
+  provider: AiProviderId,
+  apiKey: string,
+  systemPrompt: string,
+  userPrompt: string,
+  model?: string,
+): Promise<{ experiences: DiscoveredExperience[]; promptTokens: number; completionTokens: number }> {
+  if (provider === 'claude') {
+    return callClaude(apiKey, systemPrompt, userPrompt, model);
+  }
+  return callOpenAi(apiKey, systemPrompt, userPrompt, model);
+}
+
+/**
+ * Discover must-see experiences along a trip's route using the configured AI provider.
  *
  * 1. Loads the trip's DailyDestinations and RouteSegments from Prisma
  * 2. Checks Neo4j cache for existing results
- * 3. Chunks the route and calls OpenAI for each chunk
+ * 3. Chunks the route and calls the AI provider for each chunk
  * 4. Deduplicates, persists to Neo4j, and returns results
  */
 export async function discoverExperiences(
   tripId: string,
   apiKey: string,
+  aiProvider: AiProviderId = 'chatgpt',
+  options: DiscoveryOptions = {},
 ): Promise<DiscoveryResult> {
+  const graphProvider: AiProvider = aiProvider;
+
   // Load trip data
   const trip = await prisma.trip.findUnique({
     where: { id: tripId },
@@ -107,13 +135,14 @@ export async function discoverExperiences(
   // Build cache key from destination coordinates
   const queryKey = buildQueryKey(destinations);
 
-  // Check Neo4j cache
-  const cached = await getCachedDiscoveries(queryKey);
+  // Check Neo4j cache (provider-specific)
+  const cached = await getCachedDiscoveries(queryKey, graphProvider);
   if (cached) {
     return {
       experiences: cached,
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       cached: true,
+      aiProvider,
     };
   }
 
@@ -131,25 +160,39 @@ export async function discoverExperiences(
       experiences: [],
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       cached: false,
+      aiProvider,
     };
   }
 
-  // Load already-cached ChatGPT experiences near this route to avoid re-researching
+  // Load already-cached AI experiences near this route to avoid re-researching
   const cachedNearby = await getCachedExperiencesNearRoute(destinations);
-  const knownPlaces = cachedNearby.map((e) => ({ name: e.name, country: e.country }));
+  // Cap the exclusion list to avoid bloating the prompt (each entry ~30 tokens)
+  const knownPlaces = cachedNearby.slice(0, 50).map((e) => ({ name: e.name, country: e.country }));
 
-  // Call OpenAI for each chunk sequentially
+  // Call AI provider for each chunk
   const systemPrompt = buildSystemPrompt();
   const allExperiences: DiscoveredExperience[] = [];
   let totalPromptTokens = 0;
   let totalCompletionTokens = 0;
 
-  for (const chunk of chunks) {
-    const userPrompt = buildUserPrompt(chunk, knownPlaces.length > 0 ? knownPlaces : undefined);
-    const result = await callOpenAi(apiKey, systemPrompt, userPrompt);
+  if (options.useBatch && aiProvider === 'claude' && chunks.length > 0) {
+    // Batch mode: submit all chunks as a single Anthropic batch
+    const userPrompts = chunks.map((chunk) =>
+      buildUserPrompt(chunk, knownPlaces.length > 0 ? knownPlaces : undefined),
+    );
+    const result = await callClaudeBatch(apiKey, systemPrompt, userPrompts, options.model);
     allExperiences.push(...result.experiences);
     totalPromptTokens += result.promptTokens;
     totalCompletionTokens += result.completionTokens;
+  } else {
+    // Sequential mode
+    for (const chunk of chunks) {
+      const userPrompt = buildUserPrompt(chunk, knownPlaces.length > 0 ? knownPlaces : undefined);
+      const result = await callAiProvider(aiProvider, apiKey, systemPrompt, userPrompt, options.model);
+      allExperiences.push(...result.experiences);
+      totalPromptTokens += result.promptTokens;
+      totalCompletionTokens += result.completionTokens;
+    }
   }
 
   // Deduplicate new results against each other and against cached experiences
@@ -162,9 +205,9 @@ export async function discoverExperiences(
       ),
     );
 
-  // Cache new discoveries in Neo4j
+  // Cache new discoveries in Neo4j (tagged with the provider)
   if (deduplicated.length > 0) {
-    await cacheDiscoveredExperiences(deduplicated, queryKey);
+    await cacheDiscoveredExperiences(deduplicated, queryKey, graphProvider);
   }
 
   // Combine cached nearby + new discoveries, sort by stars then name
@@ -179,17 +222,22 @@ export async function discoverExperiences(
       totalTokens: totalPromptTokens + totalCompletionTokens,
     },
     cached: false,
+    aiProvider,
   };
 }
 
 /**
- * Discover must-see experiences within a map viewport (bounds) using ChatGPT.
+ * Discover must-see experiences within a map viewport (bounds) using the configured AI provider.
  * Follows the same cache-avoidance pattern as the trip-based version.
  */
 export async function discoverExperiencesByBounds(
   bounds: BoundsArea,
   apiKey: string,
+  aiProvider: AiProviderId = 'chatgpt',
+  options: DiscoveryOptions = {},
 ): Promise<DiscoveryResult> {
+  const graphProvider: AiProvider = aiProvider;
+
   // Build a cache key from the rounded bounds (snap to ~0.1 degree grid)
   const roundedBounds = {
     south: Math.floor(bounds.south * 10) / 10,
@@ -202,13 +250,14 @@ export async function discoverExperiencesByBounds(
     .digest('hex')
     .slice(0, 16);
 
-  // Check exact cache first
-  const cached = await getCachedDiscoveries(queryKey);
+  // Check exact cache first (provider-specific)
+  const cached = await getCachedDiscoveries(queryKey, graphProvider);
   if (cached) {
     return {
       experiences: cached,
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       cached: true,
+      aiProvider,
     };
   }
 
@@ -220,14 +269,16 @@ export async function discoverExperiencesByBounds(
     { lat: bounds.north, lng: bounds.east },
   ];
 
-  // Load already-cached ChatGPT experiences in this area
+  // Load already-cached AI experiences in this area
   const cachedNearby = await getCachedExperiencesNearRoute(cornerPoints, 0);
-  const knownPlaces = cachedNearby.map((e) => ({ name: e.name, country: e.country }));
+  const knownPlaces = cachedNearby.slice(0, 50).map((e) => ({ name: e.name, country: e.country }));
 
-  // Call OpenAI
+  // Call AI provider
   const systemPrompt = buildSystemPrompt();
   const userPrompt = buildAreaUserPrompt(bounds, knownPlaces.length > 0 ? knownPlaces : undefined);
-  const result = await callOpenAi(apiKey, systemPrompt, userPrompt);
+  const result = options.useBatch && aiProvider === 'claude'
+    ? await callClaudeBatch(apiKey, systemPrompt, [userPrompt], options.model)
+    : await callAiProvider(aiProvider, apiKey, systemPrompt, userPrompt, options.model);
 
   // Deduplicate against cached
   const deduplicated = deduplicateExperiences(result.experiences)
@@ -240,7 +291,7 @@ export async function discoverExperiencesByBounds(
     );
 
   if (deduplicated.length > 0) {
-    await cacheDiscoveredExperiences(deduplicated, queryKey);
+    await cacheDiscoveredExperiences(deduplicated, queryKey, graphProvider);
   }
 
   const combined = [...cachedNearby, ...deduplicated];
@@ -254,5 +305,6 @@ export async function discoverExperiencesByBounds(
       totalTokens: result.promptTokens + result.completionTokens,
     },
     cached: false,
+    aiProvider,
   };
 }

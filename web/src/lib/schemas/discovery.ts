@@ -53,4 +53,5 @@ export const discoveryResponseSchema = z.object({
     totalTokens: z.number(),
   }),
   cached: z.boolean(),
+  aiProvider: z.enum(['chatgpt', 'claude']),
 });

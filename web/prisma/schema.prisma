@@ -20,9 +20,30 @@ model Trip {
   dailyDestinations  DailyDestination[]
   dailyPois          DailyPoi[]
   routeSegments      RouteSegment[]
+  branches           Branch[]
 
   @@index([createdAt])
   @@map("trips")
+}
+
+/// An alternative plan for one or more days of a trip.
+/// Main branch is represented by branchId = NULL on day-scoped models.
+model Branch {
+  id        String   @id @default(cuid())
+  tripId    String   @map("trip_id")
+  name      String   @db.VarChar(100)
+  color     String   @db.VarChar(7)
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  dailyDestinations DailyDestination[]
+  dailyPois         DailyPoi[]
+  routeSegments     RouteSegment[]
+
+  @@index([tripId])
+  @@map("branches")
 }
 
 model DailyDestination {
@@ -34,11 +55,13 @@ model DailyDestination {
   latitude     Float?
   longitude    Float?
   notes        String?
+  branchId     String?  @map("branch_id")
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   trip         Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  branch       Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
-  @@unique([tripId, dayDate])
+  @@index([tripId, dayDate, branchId])
   @@index([tripId])
   @@index([dayDate])
   @@map("daily_destinations")
@@ -63,12 +86,14 @@ model RouteSegment {
   durationSeconds   Float           @map("duration_seconds")
   /// Google-encoded polyline for the full route geometry (nullable).
   encodedPolyline   String?         @map("encoded_polyline")
+  branchId          String?         @map("branch_id")
   createdAt         DateTime        @default(now())
   updatedAt         DateTime        @updatedAt
   trip              Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  branch            Branch?         @relation(fields: [branchId], references: [id], onDelete: Cascade)
   waypoints         RouteWaypoint[]
 
-  @@unique([tripId, dayDate])
+  @@index([tripId, dayDate, branchId])
   @@index([tripId])
   @@map("route_segments")
 }
@@ -106,9 +131,11 @@ model DailyPoi {
   longitude Float
   notes     String?
   category  String   @default("poi") @db.VarChar(20)
+  branchId  String?  @map("branch_id")
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  branch    Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   @@index([tripId])
   @@index([dayDate])
