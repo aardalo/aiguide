@@ -6,6 +6,8 @@ import { callOpenAi } from './openai';
 import { callClaude } from './claude';
 import { callClaudeBatch } from './claude-batch';
 import { getCachedDiscoveries, getCachedExperiencesNearRoute, cacheDiscoveredExperiences, type AiProvider } from './graph';
+import { searchForChunk, searchForBounds } from './searxng';
+import { refineCoordinatesViaGoogle } from './geocode-refine';
 
 /**
  * Haversine distance in km between two lat/lng points.
@@ -68,10 +70,16 @@ function buildQueryKey(
   return createHash('sha256').update(coords).digest('hex').slice(0, 16);
 }
 
+/** Progress callback for streaming status updates to the client. */
+export type ProgressCallback = (message: string) => void;
+
 /** Options passed through from the API route to control model and batch mode. */
 export interface DiscoveryOptions {
   model?: string;
   useBatch?: boolean;
+  searxngBaseUrl?: string;
+  googleApiKey?: string;
+  onProgress?: ProgressCallback;
 }
 
 /**
@@ -169,25 +177,46 @@ export async function discoverExperiences(
   // Cap the exclusion list to avoid bloating the prompt (each entry ~30 tokens)
   const knownPlaces = cachedNearby.slice(0, 50).map((e) => ({ name: e.name, country: e.country }));
 
+  const progress = options.onProgress ?? (() => {});
+  const providerLabel = aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
+  const modelLabel = options.model || (aiProvider === 'claude' ? 'claude-sonnet-4' : 'gpt-4o');
+
+  // Pre-fetch search results from SearXNG (if configured)
+  const knownNames = knownPlaces.map((p) => p.name);
+  let searchContexts: string[] = [];
+  if (options.searxngBaseUrl) {
+    progress(`Searching SearXNG for ${chunks.length} route chunk${chunks.length > 1 ? 's' : ''}...`);
+    searchContexts = await Promise.all(
+      chunks.map((chunk) => searchForChunk(options.searxngBaseUrl!, chunk, knownNames)), // eslint-disable-line @typescript-eslint/no-non-null-assertion -- checked above
+    );
+    const totalSearchResults = searchContexts.reduce((sum, ctx) => sum + (ctx ? ctx.split('\n').filter((l) => /^\d+\./.test(l)).length : 0), 0);
+    progress(`SearXNG: ${totalSearchResults} results from ${chunks.length} chunk${chunks.length > 1 ? 's' : ''}`);
+  }
+
   // Call AI provider for each chunk
   const systemPrompt = buildSystemPrompt();
   const allExperiences: DiscoveredExperience[] = [];
   let totalPromptTokens = 0;
   let totalCompletionTokens = 0;
+  const knownOrUndefined = knownPlaces.length > 0 ? knownPlaces : undefined;
 
   if (options.useBatch && aiProvider === 'claude' && chunks.length > 0) {
     // Batch mode: submit all chunks as a single Anthropic batch
-    const userPrompts = chunks.map((chunk) =>
-      buildUserPrompt(chunk, knownPlaces.length > 0 ? knownPlaces : undefined),
+    const userPrompts = chunks.map((chunk, i) =>
+      buildUserPrompt(chunk, knownOrUndefined, searchContexts[i] || undefined),
     );
+    const totalChars = userPrompts.reduce((sum, p) => sum + p.length, 0) + systemPrompt.length;
+    progress(`Sending ${(totalChars / 1000).toFixed(1)}k chars to ${providerLabel} batch (${modelLabel})...`);
     const result = await callClaudeBatch(apiKey, systemPrompt, userPrompts, options.model);
     allExperiences.push(...result.experiences);
     totalPromptTokens += result.promptTokens;
     totalCompletionTokens += result.completionTokens;
   } else {
     // Sequential mode
-    for (const chunk of chunks) {
-      const userPrompt = buildUserPrompt(chunk, knownPlaces.length > 0 ? knownPlaces : undefined);
+    for (let i = 0; i < chunks.length; i++) {
+      const userPrompt = buildUserPrompt(chunks[i], knownOrUndefined, searchContexts[i] || undefined);
+      const totalChars = userPrompt.length + systemPrompt.length;
+      progress(`Sending chunk ${i + 1}/${chunks.length} (${(totalChars / 1000).toFixed(1)}k chars) to ${providerLabel} (${modelLabel})...`);
       const result = await callAiProvider(aiProvider, apiKey, systemPrompt, userPrompt, options.model);
       allExperiences.push(...result.experiences);
       totalPromptTokens += result.promptTokens;
@@ -196,7 +225,7 @@ export async function discoverExperiences(
   }
 
   // Deduplicate new results against each other and against cached experiences
-  const deduplicated = deduplicateExperiences([...allExperiences])
+  let deduplicated = deduplicateExperiences([...allExperiences])
     .filter((exp) =>
       !cachedNearby.some(
         (cached) =>
@@ -204,6 +233,12 @@ export async function discoverExperiences(
           cached.name.toLowerCase().includes(exp.name.toLowerCase().slice(0, 10)),
       ),
     );
+
+  // Refine coordinates via Google Places (if key configured)
+  if (options.googleApiKey && deduplicated.length > 0) {
+    const { refined } = await refineCoordinatesViaGoogle(deduplicated, options.googleApiKey, progress);
+    deduplicated = refined;
+  }
 
   // Cache new discoveries in Neo4j (tagged with the provider)
   if (deduplicated.length > 0) {
@@ -273,15 +308,32 @@ export async function discoverExperiencesByBounds(
   const cachedNearby = await getCachedExperiencesNearRoute(cornerPoints, 0);
   const knownPlaces = cachedNearby.slice(0, 50).map((e) => ({ name: e.name, country: e.country }));
 
+  const progress = options.onProgress ?? (() => {});
+  const providerLabel = aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
+  const modelLabel = options.model || (aiProvider === 'claude' ? 'claude-sonnet-4' : 'gpt-4o');
+
+  // Pre-fetch search results from SearXNG (if configured)
+  let searchContext: string | undefined;
+  if (options.searxngBaseUrl) {
+    progress('Searching SearXNG for visible area...');
+    const knownNames = knownPlaces.map((p) => p.name);
+    const rawContext = await searchForBounds(options.searxngBaseUrl, bounds, knownNames);
+    searchContext = rawContext || undefined;
+    const searchResultCount = rawContext ? rawContext.split('\n').filter((l) => /^\d+\./.test(l)).length : 0;
+    progress(`SearXNG: ${searchResultCount} results`);
+  }
+
   // Call AI provider
   const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildAreaUserPrompt(bounds, knownPlaces.length > 0 ? knownPlaces : undefined);
+  const userPrompt = buildAreaUserPrompt(bounds, knownPlaces.length > 0 ? knownPlaces : undefined, searchContext);
+  const totalChars = userPrompt.length + systemPrompt.length;
+  progress(`Sending ${(totalChars / 1000).toFixed(1)}k chars to ${providerLabel} (${modelLabel})...`);
   const result = options.useBatch && aiProvider === 'claude'
     ? await callClaudeBatch(apiKey, systemPrompt, [userPrompt], options.model)
     : await callAiProvider(aiProvider, apiKey, systemPrompt, userPrompt, options.model);
 
   // Deduplicate against cached
-  const deduplicated = deduplicateExperiences(result.experiences)
+  let deduplicated = deduplicateExperiences(result.experiences)
     .filter((exp) =>
       !cachedNearby.some(
         (c) =>
@@ -289,6 +341,12 @@ export async function discoverExperiencesByBounds(
           c.name.toLowerCase().includes(exp.name.toLowerCase().slice(0, 10)),
       ),
     );
+
+  // Refine coordinates via Google Places (if key configured)
+  if (options.googleApiKey && deduplicated.length > 0) {
+    const { refined } = await refineCoordinatesViaGoogle(deduplicated, options.googleApiKey, progress);
+    deduplicated = refined;
+  }
 
   if (deduplicated.length > 0) {
     await cacheDiscoveredExperiences(deduplicated, queryKey, graphProvider);

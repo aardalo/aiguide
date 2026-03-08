@@ -32,6 +32,7 @@ export const SETTING_KEYS = {
   AI_MODEL_CHATGPT: 'ai.model.chatgpt',
   AI_MODEL_CLAUDE: 'ai.model.claude',
   AI_CLAUDE_BATCH: 'ai.claude_batch',
+  SEARXNG_BASE_URL: 'searxng.base_url',
 } as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];

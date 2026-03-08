@@ -21,7 +21,6 @@ interface BatchRequest {
     temperature: number;
     max_tokens: number;
     system: string;
-    tools: Array<{ type: string; name: string; max_uses: number }>;
     messages: Array<{ role: string; content: string }>;
   };
 }
@@ -87,13 +86,6 @@ export async function callClaudeBatch(
       temperature: TEMPERATURE,
       max_tokens: MAX_TOKENS,
       system: systemPrompt,
-      tools: [
-        {
-          type: 'web_search_20250305',
-          name: 'web_search',
-          max_uses: 5,
-        },
-      ],
       messages: [{ role: 'user', content: prompt }],
     },
   }));

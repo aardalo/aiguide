@@ -45,6 +45,7 @@ export default function AiProviderForm() {
   const [chatgptModel, setChatgptModel] = useState('gpt-4o');
   const [claudeModel, setClaudeModel] = useState('claude-sonnet-4-20250514');
   const [claudeBatch, setClaudeBatch] = useState(false);
+  const [searxngUrl, setSearxngUrl] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -62,6 +63,7 @@ export default function AiProviderForm() {
         setChatgptModel(sm['ai.model.chatgpt'] || 'gpt-4o');
         setClaudeModel(sm['ai.model.claude'] || 'claude-sonnet-4-20250514');
         setClaudeBatch(sm['ai.claude_batch'] === 'true');
+        setSearxngUrl(sm['searxng.base_url'] || '');
         setApiKeys(sm);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load settings');
@@ -155,6 +157,42 @@ export default function AiProviderForm() {
           <p className="text-sm text-success-800">{successMessage}</p>
         </div>
       )}
+
+      {/* SearXNG URL */}
+      <div>
+        <label htmlFor="searxngUrl" className="block text-sm font-medium text-neutral-700 mb-1">
+          SearXNG URL
+        </label>
+        <div className="flex gap-2">
+          <input
+            id="searxngUrl"
+            type="url"
+            placeholder="http://192.168.1.17:8080"
+            value={searxngUrl}
+            onChange={(e) => setSearxngUrl(e.target.value)}
+            className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-all"
+          />
+          <button
+            type="button"
+            onClick={async () => {
+              setSuccessMessage(null);
+              setError(null);
+              try {
+                await save('searxng.base_url', searxngUrl);
+                setSuccessMessage('SearXNG URL saved.');
+              } catch (err) {
+                setError(err instanceof Error ? err.message : 'Failed to save');
+              }
+            }}
+            className="rounded-md bg-primary-600 px-3 py-2 text-sm font-medium text-white hover:bg-primary-700 transition-all"
+          >
+            Save
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-neutral-500">
+          Self-hosted SearXNG instance for web research. Leave empty to skip pre-search (AI uses training data only).
+        </p>
+      </div>
 
       {/* AI provider selector */}
       <div>

@@ -66,12 +66,6 @@ export async function callOpenAi(
     model: model || DEFAULT_MODEL,
     temperature: TEMPERATURE,
     max_output_tokens: MAX_OUTPUT_TOKENS,
-    tools: [
-      {
-        type: 'web_search_preview',
-        search_context_size: 'medium',
-      },
-    ],
     input: [
       { role: 'developer', content: systemPrompt },
       { role: 'user', content: userPrompt },

@@ -1324,22 +1324,66 @@ export default function MapPage() {
       const ne = b.getNorthEast();
       const res = await fetch('/api/discover-experiences', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/x-ndjson',
+        },
         body: JSON.stringify({
           bounds: { south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng },
         }),
       });
-      const data = await res.json();
+
       if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
         statusBarRef.current?.pushStatus(`AI Research failed: ${data.error ?? res.status}`, JSON.stringify(data));
         return;
       }
-      const experiences = (data.experiences ?? []).map((e: DiscoveredExperienceMarker) => ({ ...e, aiProvider: data.aiProvider ?? 'chatgpt' }));
-      setExperienceResults(experiences);
-      const providerLabel = data.aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
-      statusBarRef.current?.pushStatus(
-        `AI Research (${providerLabel}): ${experiences.length} experiences${data.cached ? ' (cached)' : ''} — ${data.tokenUsage?.totalTokens ?? 0} tokens`,
-      );
+
+      // Read NDJSON stream for progress updates
+      const reader = res.body?.getReader();
+      if (!reader) {
+        statusBarRef.current?.pushStatus('AI Research failed: no response stream');
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let resultData: Record<string, unknown> | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const ev = JSON.parse(line) as { type: string; message?: string; data?: Record<string, unknown> };
+            if (ev.type === 'progress' && ev.message) {
+              statusBarRef.current?.setLoading(ev.message);
+            } else if (ev.type === 'result' && ev.data) {
+              resultData = ev.data;
+            } else if (ev.type === 'error') {
+              statusBarRef.current?.pushStatus(`AI Research failed: ${ev.message ?? 'Unknown error'}`);
+            }
+          } catch { /* ignore malformed lines */ }
+        }
+      }
+
+      if (resultData) {
+        const data = resultData;
+        const aiProv: 'chatgpt' | 'claude' = data.aiProvider === 'claude' ? 'claude' : 'chatgpt';
+        const experiences = ((data.experiences ?? []) as DiscoveredExperienceMarker[]).map((e) => ({ ...e, aiProvider: aiProv }));
+        setExperienceResults(experiences);
+        const providerLabel = (data.aiProvider as string) === 'claude' ? 'Claude' : 'ChatGPT';
+        const tokens = (data.tokenUsage as { totalTokens?: number })?.totalTokens ?? 0;
+        statusBarRef.current?.pushStatus(
+          `AI Research (${providerLabel}): ${experiences.length} experiences${(data.cached as boolean) ? ' (cached)' : ''} — ${tokens} tokens`,
+        );
+      }
     } catch (err) {
       console.error('[MapPage] AI area research error:', err);
       statusBarRef.current?.pushStatus('AI Research failed', String(err));

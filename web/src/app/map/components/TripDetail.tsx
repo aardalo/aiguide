@@ -176,7 +176,7 @@ export default function TripDetail({
     }
   };
 
-  // Run AI experience discovery for the trip
+  // Run AI experience discovery for the trip (streaming NDJSON progress)
   const handleAiResearch = async () => {
     if (!trip) return;
     setIsResearching(true);
@@ -184,32 +184,76 @@ export default function TripDetail({
     try {
       const res = await fetch('/api/discover-experiences', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/x-ndjson',
+        },
         body: JSON.stringify({ tripId: trip.id }),
       });
-      const data = await res.json();
+
       if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
         onStatusMessage?.(`AI Research failed: ${data.error ?? res.statusText}`, JSON.stringify(data, null, 2));
         return;
       }
-      const count = data.experiences?.length ?? 0;
-      const stars3 = data.experiences?.filter((e: { michelinStars: number }) => e.michelinStars === 3).length ?? 0;
-      const stars2 = data.experiences?.filter((e: { michelinStars: number }) => e.michelinStars === 2).length ?? 0;
-      const stars1 = count - stars3 - stars2;
-      const summary = [
-        stars3 > 0 ? `${stars3} must-visit` : '',
-        stars2 > 0 ? `${stars2} worth a detour` : '',
-        stars1 > 0 ? `${stars1} worth a stop` : '',
-      ].filter(Boolean).join(', ');
-      const cachedLabel = data.cached ? ' (cached)' : '';
-      const providerLabel = data.aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
-      onStatusMessage?.(
-        `AI Research (${providerLabel}): found ${count} experiences${cachedLabel} — ${summary}`,
-        JSON.stringify(data, null, 2),
-      );
-      if (data.experiences?.length) {
-        const aiProv = data.aiProvider ?? 'chatgpt';
-        onExperiencesDiscovered?.(data.experiences.map((e: Record<string, unknown>) => ({ ...e, aiProvider: aiProv })));
+
+      // Read NDJSON stream for progress updates
+      const reader = res.body?.getReader();
+      if (!reader) {
+        onStatusMessage?.('AI Research failed: no response stream');
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let resultData: Record<string, unknown> | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const ev = JSON.parse(line) as { type: string; message?: string; data?: Record<string, unknown> };
+            if (ev.type === 'progress' && ev.message) {
+              onSetLoading?.(ev.message);
+            } else if (ev.type === 'result' && ev.data) {
+              resultData = ev.data;
+            } else if (ev.type === 'error') {
+              onStatusMessage?.(`AI Research failed: ${ev.message ?? 'Unknown error'}`);
+            }
+          } catch { /* ignore malformed lines */ }
+        }
+      }
+
+      if (resultData) {
+        const data = resultData;
+        const experiences = (data.experiences as Array<Record<string, unknown>>) ?? [];
+        const count = experiences.length;
+        const stars3 = experiences.filter((e) => e.michelinStars === 3).length;
+        const stars2 = experiences.filter((e) => e.michelinStars === 2).length;
+        const stars1 = count - stars3 - stars2;
+        const summary = [
+          stars3 > 0 ? `${stars3} must-visit` : '',
+          stars2 > 0 ? `${stars2} worth a detour` : '',
+          stars1 > 0 ? `${stars1} worth a stop` : '',
+        ].filter(Boolean).join(', ');
+        const cachedLabel = (data.cached as boolean) ? ' (cached)' : '';
+        const providerLabel = (data.aiProvider as string) === 'claude' ? 'Claude' : 'ChatGPT';
+        const tokens = (data.tokenUsage as { totalTokens?: number })?.totalTokens ?? 0;
+        onStatusMessage?.(
+          `AI Research (${providerLabel}): found ${count} experiences${cachedLabel} — ${summary} (${tokens} tokens)`,
+          JSON.stringify(data, null, 2),
+        );
+        if (count > 0) {
+          const aiProv: 'chatgpt' | 'claude' = data.aiProvider === 'claude' ? 'claude' : 'chatgpt';
+          onExperiencesDiscovered?.(experiences.map((e) => ({ ...(e as { name: string; michelinStars: number; category: string; description: string; reasoning: string; approximateLat: number; approximateLng: number; nearestCity: string; country: string; estimatedDetourKm: number; seasonalNotes?: string; sources?: string[] }), aiProvider: aiProv })));
+        }
       }
     } catch (err) {
       onStatusMessage?.('AI Research failed', String(err));

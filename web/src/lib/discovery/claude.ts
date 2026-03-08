@@ -62,13 +62,6 @@ export async function callClaude(
     temperature: TEMPERATURE,
     max_tokens: MAX_TOKENS,
     system: systemPrompt,
-    tools: [
-      {
-        type: 'web_search_20250305',
-        name: 'web_search',
-        max_uses: 5,
-      },
-    ],
     messages: [
       { role: 'user', content: userPrompt },
     ],
