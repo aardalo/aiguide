@@ -146,28 +146,27 @@ export default function TripDetail({
     }
   }, [tripId]);
 
-  // Toggle plan mode
-  const togglePlanMode = async () => {
-    if (!trip) return;
-    
+  // Set plan mode to a specific value
+  const setPlanMode = async (value: boolean) => {
+    if (!trip || trip.planMode === value) return;
+
     setIsTogglingPlanMode(true);
-    
+
     try {
       const response = await fetch(`/api/trips/${trip.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planMode: !trip.planMode }),
+        body: JSON.stringify({ planMode: value }),
       });
-      
+
       if (!response.ok) {
-        throw new Error('Failed to update plan mode');
+        throw new Error('Failed to update mode');
       }
-      
+
       const updatedTrip = await response.json();
       setTrip(updatedTrip);
     } catch (err) {
-      console.error('[TripDetail] Error toggling plan mode:', err);
-      // Show error but don't clear the trip
+      console.error('[TripDetail] Error setting mode:', err);
     } finally {
       setIsTogglingPlanMode(false);
     }
@@ -449,43 +448,31 @@ export default function TripDetail({
           )}
         </div>
 
-        {/* Plan Mode Toggle */}
+        {/* Mode selector */}
         <div className="mt-6 border-t border-neutral-200 pt-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <svg
-                className="h-5 w-5 text-neutral-400"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"
-                />
-              </svg>
-              <div>
-                <p className="text-sm font-medium text-neutral-900">Plan Mode</p>
-                <p className="text-xs text-neutral-500">Enable daily itinerary planning</p>
-              </div>
-            </div>
-            
+          <p className="text-xs font-medium text-neutral-500 uppercase tracking-wide mb-2">Mode</p>
+          <div className="flex gap-1 rounded-lg bg-neutral-100 p-1">
             <button
-              onClick={togglePlanMode}
+              onClick={() => setPlanMode(false)}
               disabled={isTogglingPlanMode}
-              className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${
-                trip.planMode ? 'bg-primary-600' : 'bg-neutral-200'
+              className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-all disabled:opacity-50 ${
+                !trip.planMode
+                  ? 'bg-white text-neutral-900 shadow-sm'
+                  : 'text-neutral-600 hover:text-neutral-800'
               }`}
-              role="switch"
-              aria-checked={trip.planMode}
             >
-              <span
-                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                  trip.planMode ? 'translate-x-5' : 'translate-x-0'
-                }`}
-              />
+              Travel
+            </button>
+            <button
+              onClick={() => setPlanMode(true)}
+              disabled={isTogglingPlanMode}
+              className={`flex-1 px-3 py-1.5 text-sm font-medium rounded-md transition-all disabled:opacity-50 ${
+                trip.planMode
+                  ? 'bg-white text-neutral-900 shadow-sm'
+                  : 'text-neutral-600 hover:text-neutral-800'
+              }`}
+            >
+              Plan
             </button>
           </div>
         </div>

@@ -264,6 +264,27 @@ export default function MapPage() {
   const [editingTrip, setEditingTrip] = useState<TripResponse | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   
+  // Trips dropdown menu state
+  const [tripsMenuOpen, setTripsMenuOpen] = useState(false);
+  const tripsMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!tripsMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (tripsMenuRef.current && !tripsMenuRef.current.contains(e.target as Node)) {
+        setTripsMenuOpen(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTripsMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [tripsMenuOpen]);
+
   // Delete confirmation state
   const [tripToDelete, setTripToDelete] = useState<TripResponse | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -1972,11 +1993,102 @@ export default function MapPage() {
       {/* Header */}
       <header className="bg-white border-b border-neutral-200 px-6 py-4">
         <div className="flex items-center justify-between">
-          <div>
+          <div className="shrink-0">
             <h1 className="text-2xl font-bold text-neutral-900">Trip Planner</h1>
             <StatusBar ref={statusBarRef} />
           </div>
-          <div className="flex items-center gap-4">
+          {/* Place search bar — centered in header */}
+          <div className="flex-1 flex justify-center px-6">
+            <div className="relative w-80">
+              <input
+                type="text"
+                value={placeSearchQuery}
+                onChange={(e) => handlePlaceSearchChange(e.target.value)}
+                onFocus={() => { if (placeSearchResults.length > 0) setPlaceSearchOpen(true); }}
+                onBlur={() => { setTimeout(() => setPlaceSearchOpen(false), 200); }}
+                placeholder="Search for a place..."
+                className="w-full bg-neutral-50 border border-neutral-300 rounded-lg px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+              />
+              {placeSearching && (
+                <span className="absolute right-2.5 top-1/2 -translate-y-1/2">
+                  <svg className="animate-spin h-4 w-4 text-neutral-400" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                  </svg>
+                </span>
+              )}
+              {!placeSearching && placeSearchQuery.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => { setPlaceSearchQuery(''); setPlaceSearchResults([]); setPlaceSearchOpen(false); }}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 text-sm"
+                  aria-label="Clear search"
+                >
+                  &times;
+                </button>
+              )}
+              {placeSearchOpen && placeSearchResults.length > 0 && (
+                <ul className="absolute left-0 right-0 mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg overflow-hidden divide-y divide-neutral-100 max-h-64 overflow-y-auto z-50">
+                  {placeSearchResults.map((result) => {
+                    const secondary = result.displayName.indexOf(',') >= 0
+                      ? result.displayName.slice(result.displayName.indexOf(',') + 1).trim()
+                      : '';
+                    return (
+                      <li key={result.placeId}>
+                        <button
+                          type="button"
+                          onClick={() => handlePlaceSelect(result)}
+                          className="w-full text-left px-3 py-2 hover:bg-primary-50 transition-colors"
+                        >
+                          <p className="text-sm font-medium text-neutral-900">{result.name}</p>
+                          {secondary && (
+                            <p className="text-xs text-neutral-500 truncate">{secondary}</p>
+                          )}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </div>
+          <div className="shrink-0 flex items-center gap-4">
+            <div className="relative" ref={tripsMenuRef}>
+              <button
+                onClick={() => setTripsMenuOpen((v) => !v)}
+                className={`text-sm font-medium transition-colors ${
+                  sidebarView === 'create' || sidebarView === 'list' || sidebarView === 'detail' || sidebarView === 'edit'
+                    ? 'text-primary-700 font-semibold'
+                    : 'text-primary-600 hover:text-primary-800'
+                }`}
+              >
+                Trips
+              </button>
+              {tripsMenuOpen && (
+                <div className="absolute top-full right-0 mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg z-50 min-w-40 py-1">
+                  <button
+                    type="button"
+                    onClick={() => { setSidebarView('create'); setTripsMenuOpen(false); }}
+                    className={`w-full text-left px-4 py-2 text-sm hover:bg-primary-50 transition-colors ${
+                      sidebarView === 'create' ? 'text-primary-700 font-semibold' : 'text-neutral-700'
+                    }`}
+                  >
+                    Create Trip
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setSidebarView('list'); setTripsMenuOpen(false); }}
+                    className={`w-full text-left px-4 py-2 text-sm hover:bg-primary-50 transition-colors ${
+                      sidebarView === 'list' || sidebarView === 'detail' || sidebarView === 'edit'
+                        ? 'text-primary-700 font-semibold'
+                        : 'text-neutral-700'
+                    }`}
+                  >
+                    My Trips
+                  </button>
+                </div>
+              )}
+            </div>
             <button
               onClick={handleShowCached}
               className="text-sm text-primary-600 hover:text-primary-800 font-medium"
@@ -2012,61 +2124,6 @@ export default function MapPage() {
             </div>
           )}
 
-          {/* Place search bar */}
-          <div className="absolute top-3 left-3 z-[700] w-80">
-            <div className="relative">
-              <input
-                type="text"
-                value={placeSearchQuery}
-                onChange={(e) => handlePlaceSearchChange(e.target.value)}
-                onFocus={() => { if (placeSearchResults.length > 0) setPlaceSearchOpen(true); }}
-                onBlur={() => { setTimeout(() => setPlaceSearchOpen(false), 200); }}
-                placeholder="Search for a place..."
-                className="w-full bg-white border border-neutral-300 rounded-lg shadow-md px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-              />
-              {placeSearching && (
-                <span className="absolute right-2.5 top-1/2 -translate-y-1/2">
-                  <svg className="animate-spin h-4 w-4 text-neutral-400" viewBox="0 0 24 24" fill="none">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-                  </svg>
-                </span>
-              )}
-              {!placeSearching && placeSearchQuery.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => { setPlaceSearchQuery(''); setPlaceSearchResults([]); setPlaceSearchOpen(false); }}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 text-sm"
-                  aria-label="Clear search"
-                >
-                  &times;
-                </button>
-              )}
-            </div>
-            {placeSearchOpen && placeSearchResults.length > 0 && (
-              <ul className="mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg overflow-hidden divide-y divide-neutral-100 max-h-64 overflow-y-auto">
-                {placeSearchResults.map((result) => {
-                  const secondary = result.displayName.indexOf(',') >= 0
-                    ? result.displayName.slice(result.displayName.indexOf(',') + 1).trim()
-                    : '';
-                  return (
-                    <li key={result.placeId}>
-                      <button
-                        type="button"
-                        onClick={() => handlePlaceSelect(result)}
-                        className="w-full text-left px-3 py-2 hover:bg-primary-50 transition-colors"
-                      >
-                        <p className="text-sm font-medium text-neutral-900">{result.name}</p>
-                        {secondary && (
-                          <p className="text-xs text-neutral-500 truncate">{secondary}</p>
-                        )}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
 
           {/* Context menu shown on map click */}
           {contextMenu && (
@@ -2620,32 +2677,6 @@ export default function MapPage() {
 
         {/* Sidebar for trip management */}
         <aside className="w-96 bg-white border-l border-neutral-200 overflow-y-auto flex flex-col">
-          {/* Sidebar Navigation */}
-          <div className="border-b border-neutral-200 p-4">
-            <div className="flex gap-2">
-              <button
-                onClick={() => setSidebarView('create')}
-                className={`flex-1 px-4 py-2.5 text-sm font-medium rounded-md transition-all ${
-                  sidebarView === 'create'
-                    ? 'bg-primary-600 text-white'
-                    : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
-                }`}
-              >
-                Create Trip
-              </button>
-              <button
-                onClick={() => setSidebarView('list')}
-                className={`flex-1 px-4 py-2.5 text-sm font-medium rounded-md transition-all ${
-                  sidebarView === 'list' || sidebarView === 'detail' || sidebarView === 'edit'
-                    ? 'bg-primary-600 text-white'
-                    : 'bg-neutral-100 text-neutral-700 hover:bg-neutral-200'
-                }`}
-              >
-                My Trips
-              </button>
-            </div>
-          </div>
-
           {/* Sidebar Content */}
           <div className="flex-1 overflow-y-auto">
             {sidebarView === 'create' && (
