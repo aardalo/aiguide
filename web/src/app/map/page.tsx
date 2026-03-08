@@ -854,11 +854,6 @@ export default function MapPage() {
     });
   }, [experienceResults, isMapReady, isExperienceVisible]);
 
-  // Keep experience ref in sync
-  useEffect(() => {
-    setSelectedExperienceRef.current = setSelectedExperience;
-  });
-
   // Draw/update POI markers whenever tripPois or the map changes
   useEffect(() => {
     if (!isMapReady || !mapRef.current) return;
@@ -1136,11 +1131,6 @@ export default function MapPage() {
   useEffect(() => {
     onSegmentClickRef.current = handleSegmentClick;
   }, [handleSegmentClick]);
-
-  // Keep setter ref current so Leaflet marker handlers can call the latest version
-  useEffect(() => {
-    setSelectedNearbyPlaceRef.current = setSelectedNearbyPlace;
-  });
 
   // ── Search Nearby handlers ─────────────────────────────────────────────────
 

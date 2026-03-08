@@ -13,7 +13,6 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import {
   dailyDestinationCreateSchema,
-  dailyDestinationResponseSchema,
 } from "@/lib/schemas/trip";
 
 /**
@@ -80,8 +79,8 @@ export async function POST(request: NextRequest) {
 
     const data = validation.data;
 
-    // tripId must be provided in the request body
-    const tripId = (body as any).tripId;
+    // tripId must be provided in the request body (not in Zod schema — validated separately)
+    const tripId = (body as Record<string, unknown>).tripId as string | undefined;
     if (!tripId) {
       return NextResponse.json(
         { error: "tripId is required" },

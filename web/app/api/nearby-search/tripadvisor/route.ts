@@ -111,7 +111,7 @@ export async function POST(request: NextRequest) {
       console.warn('[nearby-search/tripadvisor] Auth failed:', res.status, body);
       return NextResponse.json(
         { error: `Tripadvisor API key rejected (${res.status}). Check your key in Settings.`, places: cached },
-        { status: 200 },
+        { status: res.status },
       );
     }
 

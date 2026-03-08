@@ -41,6 +41,7 @@ export async function searchNominatim(query: string, limit = 5): Promise<PlaceRe
       'User-Agent': USER_AGENT,
       Accept: 'application/json',
     },
+    signal: AbortSignal.timeout(10_000),
   });
 
   if (!response.ok) {

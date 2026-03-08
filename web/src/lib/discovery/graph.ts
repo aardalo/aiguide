@@ -55,7 +55,7 @@ export async function getCachedDiscoveries(
         country: (p.country as string) ?? '',
         estimatedDetourKm: toNumber(p.estimatedDetourKm),
         seasonalNotes: (p.seasonalNotes as string) || undefined,
-        sources: p.sources ? JSON.parse(p.sources as string) : undefined,
+        sources: p.sources ? (() => { try { return JSON.parse(p.sources as string); } catch { return undefined; } })() : undefined,
       };
     });
   } catch (err) {
@@ -187,7 +187,7 @@ export async function getCachedExperiencesNearRoute(
         country: (p.country as string) ?? '',
         estimatedDetourKm: toNumber(p.estimatedDetourKm),
         seasonalNotes: (p.seasonalNotes as string) || undefined,
-        sources: p.sources ? JSON.parse(p.sources as string) : undefined,
+        sources: p.sources ? (() => { try { return JSON.parse(p.sources as string); } catch { return undefined; } })() : undefined,
       };
     });
   } catch (err) {

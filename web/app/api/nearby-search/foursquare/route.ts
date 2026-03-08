@@ -102,7 +102,7 @@ export async function POST(request: NextRequest) {
       console.warn('[nearby-search/foursquare] Auth failed:', res.status, text);
       return NextResponse.json(
         { error: `Foursquare API key rejected (${res.status}). Check your key in Settings.`, places: cached },
-        { status: 200 },
+        { status: res.status },
       );
     }
 

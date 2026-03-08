@@ -182,8 +182,12 @@ Sensitive keys (matching `*api_key*` or `*access_token*`) are redacted as `[SET]
 - On validation error return `400` with `{ error: "Validation failed", issues: ZodError.flatten() }`.
 - On not-found return `404` with `{ error: "Not found" }`.
 - On unexpected error return `500` with `{ error: "Internal server error" }`.
+- **Forward upstream HTTP status codes** — when a third-party API returns 401/403/429, propagate that status to the client. Never mask auth/rate-limit errors behind `200`.
 - Never expose raw Prisma errors or stack traces in responses.
 - Use `prisma` from `src/lib/prisma.ts` — never construct a new `PrismaClient` inline.
+- **Always add timeouts to external fetch calls** — use `signal: AbortSignal.timeout(N)` to prevent indefinite hangs. Use 10s for geocoding/search, 5s for lightweight lookups.
+- **Guard `JSON.parse()` calls** on data from external sources (Neo4j properties, third-party API responses, batch result lines). Wrap in try-catch or use Zod `.safeParse()`.
+- Avoid `as any` — use `as Record<string, unknown>` or define proper TypeScript interfaces for external API response shapes.
 
 ---
 

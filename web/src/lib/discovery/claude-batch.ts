@@ -171,7 +171,13 @@ export async function callClaudeBatch(
   let totalCompletionTokens = 0;
 
   for (const line of lines) {
-    const result: BatchResultLine = JSON.parse(line);
+    let result: BatchResultLine;
+    try {
+      result = JSON.parse(line);
+    } catch {
+      console.warn('[discovery/claude-batch] Malformed result line, skipping');
+      continue;
+    }
 
     if (result.result.type !== 'succeeded' || !result.result.message) {
       console.warn(

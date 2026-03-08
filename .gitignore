@@ -23,3 +23,12 @@ containerd/
 
 # Claude Code (session data)
 .claude/
+
+# Screenshots and UI testing artifacts
+*.png
+
+# Playwright MCP
+.playwright-mcp/
+
+# Google API development artifacts
+google/

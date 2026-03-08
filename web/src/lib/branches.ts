@@ -15,10 +15,6 @@ export const BRANCH_COLORS = [
 
 export const MAIN_BRANCH_COLOR = '#e06319'; // primary-600
 
-export function getBranchColor(branch: { color: string } | null | undefined): string {
-  return branch?.color ?? MAIN_BRANCH_COLOR;
-}
-
 export function nextBranchColor(existingCount: number): string {
   return BRANCH_COLORS[existingCount % BRANCH_COLORS.length];
 }
