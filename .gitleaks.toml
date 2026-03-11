@@ -1,0 +1,7 @@
+[allowlist]
+  description = "Exclude build artifacts and generated files"
+  paths = [
+    '''web/\.next/''',
+    '''node_modules/''',
+    '''\.playwright-mcp/''',
+  ]
