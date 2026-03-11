@@ -27,6 +27,10 @@ containerd/
 # Screenshots and UI testing artifacts
 *.png
 
+# Playwright test results and reports
+web/test-results/
+web/playwright-report/
+
 # Playwright MCP
 .playwright-mcp/
 
