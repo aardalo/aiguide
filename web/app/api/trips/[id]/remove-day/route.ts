@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 const removeDaySchema = z.object({
   date: z.string().date(),
@@ -18,6 +19,15 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+
+  try {
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, id, 'edit');
+  } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
+    throw error;
+  }
 
   let body: unknown;
   try {

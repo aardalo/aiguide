@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { getSessionUser, assertTripAccess, accessErrorResponse } from "@/lib/auth/access";
 
 const changesQuerySchema = z.object({
   since: z.string().datetime().optional(),
@@ -54,6 +55,10 @@ export async function GET(
 ) {
   try {
     const { id: tripId } = await params;
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'view');
+
     const { searchParams } = new URL(request.url);
 
     // Parse query parameters
@@ -198,6 +203,8 @@ export async function GET(
       { status: 200 }
     );
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[GET /api/trips/[id]/changes] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

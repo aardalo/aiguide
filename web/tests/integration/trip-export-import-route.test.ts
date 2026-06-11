@@ -22,6 +22,13 @@ const { mockPrisma } = vi.hoisted(() => {
 
 vi.mock('@/lib/prisma', () => ({ prisma: mockPrisma }));
 
+vi.mock('@/lib/auth/access', () => ({
+  getSessionUser: vi.fn(async () => ({ id: 'test-user' })),
+  assertTripAccess: vi.fn(async () => {}),
+  accessErrorResponse: vi.fn(() => null),
+  AccessError: class AccessError extends Error { constructor(public status: number, m: string){ super(m); } },
+}));
+
 import { GET } from '../../app/api/trips/[id]/export/route';
 import { POST } from '../../app/api/trips/import/route';
 import { buildExportEnvelope } from '@/lib/trip-export/serialize';

@@ -30,6 +30,8 @@ export interface ImportOptions {
   mode: 'new' | 'merge';
   /** Required when mode is 'merge'. */
   targetTripId?: string;
+  /** Owner to assign when creating a new trip (mode === 'new'). */
+  ownerId?: string;
 }
 
 export interface ImportReport {
@@ -128,7 +130,7 @@ export async function importTrip(
 
   return prisma.$transaction(async (tx) => {
     if (options.mode === 'new') {
-      return importAsNewTrip(tx, envelope);
+      return importAsNewTrip(tx, envelope, options.ownerId);
     }
     return mergeIntoTrip(tx, envelope, options.targetTripId!);
   });
@@ -139,6 +141,7 @@ export async function importTrip(
 async function importAsNewTrip(
   tx: TxClient,
   envelope: ExportEnvelope,
+  ownerId?: string,
 ): Promise<ImportReport> {
   const { data } = envelope;
 
@@ -152,6 +155,7 @@ async function importAsNewTrip(
       routingPreferences: data.trip.routingPreferences
         ? JSON.stringify(data.trip.routingPreferences)
         : null,
+      ownerId: ownerId ?? null,
     },
   });
 

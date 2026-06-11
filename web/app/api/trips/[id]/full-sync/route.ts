@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getSessionUser, assertTripAccess, accessErrorResponse } from "@/lib/auth/access";
 
 /**
  * GET /api/trips/{tripId}/full-sync
@@ -31,6 +32,9 @@ export async function GET(
 ) {
   try {
     const { id: tripId } = await params;
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'edit');
 
     // Verify trip exists
     const trip = await prisma.trip.findUnique({
@@ -130,6 +134,8 @@ export async function GET(
       { status: 200 }
     );
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[GET /api/trips/[id]/full-sync] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

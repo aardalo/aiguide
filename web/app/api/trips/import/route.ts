@@ -18,6 +18,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { migrateToCurrent, ImportFormatError } from '@/lib/trip-export/migrations';
 import { importTrip, ImportError } from '@/lib/trip-export/import';
+import { getSessionUser, accessErrorResponse } from '@/lib/auth/access';
 
 const importRequestSchema = z.object({
   document: z.unknown(),
@@ -42,6 +43,16 @@ export async function POST(request: NextRequest) {
   }
 
   const { document, mode, targetTripId } = parsed.data;
+
+  let userId: string | undefined;
+  try {
+    const session = await getSessionUser();
+    userId = session.id;
+  } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
+    throw error;
+  }
 
   if (mode === 'merge' && !targetTripId) {
     return NextResponse.json(
@@ -74,6 +85,7 @@ export async function POST(request: NextRequest) {
     const report = await importTrip(prisma, migration.envelope, {
       mode,
       targetTripId,
+      ownerId: userId,
     });
 
     return NextResponse.json(

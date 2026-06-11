@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { buildExportEnvelope, buildExportFilename } from '@/lib/trip-export/serialize';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 /**
  * GET /api/trips/{tripId}/export
@@ -21,6 +22,9 @@ export async function GET(
 ) {
   try {
     const { id: tripId } = await params;
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'view');
 
     const trip = await prisma.trip.findUnique({
       where: { id: tripId },
@@ -71,6 +75,8 @@ export async function GET(
       },
     });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error('[GET /api/trips/[id]/export] Error:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
