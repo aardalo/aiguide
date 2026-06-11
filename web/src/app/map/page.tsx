@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useSession, signOut } from 'next-auth/react';
 import 'leaflet/dist/leaflet.css';
 import TripForm from './components/TripForm';
 import TripList from './components/TripList';
@@ -452,6 +453,21 @@ export default function MapPage() {
   const [segmentRefreshTrigger, setSegmentRefreshTrigger] = useState(0);
   // Incrementing this causes DailyDestinations to re-fetch destinations + regenerate routes
   const [destinationRefreshTrigger, setDestinationRefreshTrigger] = useState(0);
+
+  // ── Auth session ────────────────────────────────────────────────────────────
+  const { data: session } = useSession();
+  // Claim the current device when the user logs in so the device is linked to
+  // their account (Device.userId) and per-device sync stays correct.
+  useEffect(() => {
+    if (!session?.user) return;
+    const sessionId = sessionStorage.getItem('trip-planner-session-id');
+    if (!sessionId) return;
+    fetch('/api/devices/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    }).catch((err) => console.warn('[map] device claim failed:', err));
+  }, [session?.user]);
 
   // ── Cross-device synchronization ───────────────────────────────────────────
   // Identify this device so mutations can be attributed and changes from other
@@ -2852,6 +2868,14 @@ export default function MapPage() {
               )}
             </div>
           </div>
+          {session?.user && (
+            <button
+              onClick={() => signOut({ callbackUrl: '/login' })}
+              className="hidden sm:block shrink-0 text-sm text-gray-600 hover:text-gray-900"
+            >
+              Sign out ({session.user.email})
+            </button>
+          )}
           <div className="relative shrink-0" ref={tripsMenuRef}>
             <button
               type="button"

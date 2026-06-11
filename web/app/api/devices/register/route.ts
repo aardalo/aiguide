@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
+import { auth } from '../../../../auth';
 
 const registerSchema = z.object({
   sessionId: z.string().min(1).max(100),
@@ -54,6 +55,9 @@ export async function POST(request: NextRequest) {
 
     const { sessionId, name } = validation.data;
 
+    const session = await auth();
+    const userId = session?.user?.id;
+
     // Try to find existing device by sessionId
     let device = await prisma.device.findUnique({
       where: { sessionId },
@@ -67,6 +71,7 @@ export async function POST(request: NextRequest) {
           lastSeenAt: new Date(),
           // Optionally update name if provided and different
           ...(name && name !== device.name ? { name } : {}),
+          ...(userId ? { userId } : {}),
         },
       });
     } else {
@@ -76,6 +81,7 @@ export async function POST(request: NextRequest) {
           sessionId,
           name,
           lastSeenAt: new Date(),
+          ...(userId ? { userId } : {}),
         },
       });
     }
