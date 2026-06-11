@@ -13,7 +13,9 @@ function tripWith(ownerId: string, shares: Array<{ role: 'VIEWER' | 'EDITOR' }>)
 }
 
 describe('assertTripAccess', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   it('owner can view and edit', async () => {
     tripWith('owner', []);

@@ -18,7 +18,9 @@ function req(body: unknown) {
 }
 
 describe('POST /api/auth/register', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   it('creates a user with a lowercased email and hashed password', async () => {
     mockPrisma.user.create.mockResolvedValue({ id: 'u1', email: 'a@b.com', name: null });
