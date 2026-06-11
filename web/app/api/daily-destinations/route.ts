@@ -14,6 +14,7 @@ import { prisma } from "@/lib/prisma";
 import {
   dailyDestinationCreateSchema,
 } from "@/lib/schemas/trip";
+import { getSessionUser, assertTripAccess, accessErrorResponse } from "@/lib/auth/access";
 
 /**
  * GET /api/daily-destinations?tripId=xxx
@@ -29,6 +30,9 @@ export async function GET(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'view');
 
     // Verify trip exists
     const trip = await prisma.trip.findUnique({
@@ -49,6 +53,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(destinations, { status: 200 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[GET /api/daily-destinations] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -89,6 +95,9 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'edit');
 
     // Verify trip exists
     const trip = await prisma.trip.findUnique({
@@ -165,6 +174,8 @@ export async function POST(request: NextRequest) {
         { status: 409 }
       );
     }
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[POST /api/daily-destinations] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

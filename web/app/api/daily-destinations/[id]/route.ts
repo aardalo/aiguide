@@ -13,6 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { dailyDestinationUpdateSchema } from "@/lib/schemas/trip";
+import { getSessionUser, assertTripAccess, accessErrorResponse } from "@/lib/auth/access";
 
 /**
  * GET /api/daily-destinations/[id]
@@ -36,8 +37,13 @@ export async function GET(
       );
     }
 
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, destination.tripId, 'view');
+
     return NextResponse.json(destination, { status: 200 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[GET /api/daily-destinations/[id]] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -85,6 +91,9 @@ export async function PATCH(
         { status: 404 }
       );
     }
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, existingDestination.tripId, 'edit');
 
     // Validate day date is within trip date range if being updated
     if (data.dayDate) {
@@ -166,6 +175,8 @@ export async function PATCH(
         { status: 409 }
       );
     }
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[PATCH /api/daily-destinations/[id]] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -197,6 +208,9 @@ export async function DELETE(
       );
     }
 
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, existingDestination.tripId, 'edit');
+
     // Delete route segments that reference this destination (fromDestinationId
     // and toDestinationId are plain strings, not FK constraints, so no cascade).
     await prisma.routeSegment.deleteMany({
@@ -215,6 +229,8 @@ export async function DELETE(
 
     return NextResponse.json(deletedDestination, { status: 200 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[DELETE /api/daily-destinations/[id]] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

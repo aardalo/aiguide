@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { dailyPoiCreateSchema } from '@/lib/schemas/trip';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 export async function GET(request: NextRequest) {
   const tripId = request.nextUrl.searchParams.get('tripId');
@@ -16,12 +17,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'tripId query parameter is required' }, { status: 400 });
   }
   try {
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'view');
+
     const pois = await prisma.dailyPoi.findMany({
       where: { tripId },
       orderBy: [{ dayDate: 'asc' }, { createdAt: 'asc' }],
     });
     return NextResponse.json(pois);
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[GET /api/daily-pois] Error:', err);
     return NextResponse.json({ error: 'Failed to load POIs' }, { status: 500 });
   }
@@ -46,6 +52,9 @@ export async function POST(request: NextRequest) {
   const { tripId, dayDate, name, latitude, longitude, notes, category, deviceId } = validation.data;
 
   try {
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'edit');
+
     const poi = await prisma.dailyPoi.create({
       data: {
         tripId,
@@ -65,6 +74,8 @@ export async function POST(request: NextRequest) {
     });
     return NextResponse.json(poi, { status: 201 });
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[POST /api/daily-pois] Error:', err);
     return NextResponse.json({ error: 'Failed to create POI' }, { status: 500 });
   }

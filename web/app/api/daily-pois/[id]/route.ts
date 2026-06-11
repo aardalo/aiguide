@@ -9,6 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 const poiUpdateSchema = z.object({
   name: z.string().min(1).max(200).optional(),
@@ -45,6 +46,9 @@ export async function PATCH(
       return NextResponse.json({ error: 'POI not found' }, { status: 404 });
     }
 
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, existing.tripId, 'edit');
+
     const { deviceId, ...updateData } = validation.data;
 
     const updated = await prisma.dailyPoi.update({
@@ -62,6 +66,8 @@ export async function PATCH(
 
     return NextResponse.json(updated);
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[PATCH /api/daily-pois/:id] Error:', err);
     return NextResponse.json({ error: 'Failed to update POI' }, { status: 500 });
   }
@@ -86,7 +92,10 @@ export async function DELETE(
     if (!existing) {
       return NextResponse.json({ error: 'POI not found' }, { status: 404 });
     }
-    
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, existing.tripId, 'edit');
+
     // Optionally update lastModifiedByDeviceId before deletion for audit trail
     if (deviceId) {
       await prisma.dailyPoi.update({
@@ -98,6 +107,8 @@ export async function DELETE(
     await prisma.dailyPoi.delete({ where: { id } });
     return NextResponse.json({ success: true });
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[DELETE /api/daily-pois/:id] Error:', err);
     return NextResponse.json({ error: 'Failed to delete POI' }, { status: 500 });
   }
