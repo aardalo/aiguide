@@ -182,7 +182,7 @@ describe('importTrip — new mode', () => {
     const report = await importTrip(
       db as never,
       sampleEnvelope(),
-      { mode: 'new' },
+      { mode: 'new', ownerId: 'test-owner' },
     );
 
     expect(report.mode).toBe('new');
@@ -195,7 +195,7 @@ describe('importTrip — new mode', () => {
   });
 
   it('remaps segment from/to destination references to the new IDs', async () => {
-    await importTrip(db as never, sampleEnvelope(), { mode: 'new' });
+    await importTrip(db as never, sampleEnvelope(), { mode: 'new', ownerId: 'test-owner' });
 
     const seg = db.routeSegment.rows[0];
     const destIds = db.dailyDestination.rows.map((r) => r.id);
@@ -207,7 +207,7 @@ describe('importTrip — new mode', () => {
   });
 
   it('stringifies routing preferences and stores dates', async () => {
-    await importTrip(db as never, sampleEnvelope(), { mode: 'new' });
+    await importTrip(db as never, sampleEnvelope(), { mode: 'new', ownerId: 'test-owner' });
     const trip = db.trip.rows[0];
     expect(trip.routingPreferences).toBe(JSON.stringify({ avoid: ['tolls'] }));
     expect(trip.startDate).toBeInstanceOf(Date);

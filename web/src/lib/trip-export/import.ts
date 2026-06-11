@@ -127,6 +127,12 @@ export async function importTrip(
       'invalid_options',
     );
   }
+  if (options.mode === 'new' && !options.ownerId) {
+    throw new ImportError(
+      'ownerId is required when mode is "new".',
+      'invalid_options',
+    );
+  }
 
   return prisma.$transaction(async (tx) => {
     if (options.mode === 'new') {
@@ -155,7 +161,7 @@ async function importAsNewTrip(
       routingPreferences: data.trip.routingPreferences
         ? JSON.stringify(data.trip.routingPreferences)
         : null,
-      ownerId: ownerId ?? null,
+      ownerId: ownerId as string,
     },
   });
 

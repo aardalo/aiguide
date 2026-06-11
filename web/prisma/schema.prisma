@@ -53,8 +53,8 @@ model Trip {
   lastModifiedByDeviceId  String?            @map("last_modified_by_device_id")
   planMode                Boolean            @default(false) @map("plan_mode")
   routingPreferences      String?            @map("routing_preferences")
-  ownerId                 String?            @map("owner_id")
-  owner                   User?              @relation("TripOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId                 String             @map("owner_id")
+  owner                   User               @relation("TripOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   shares                  TripShare[]
   dailyDestinations       DailyDestination[]
   dailyPois               DailyPoi[]

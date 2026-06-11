@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { prisma } from "@/lib/prisma";
 
-// Test data
+// Test data (ownerId added in beforeAll)
 const testTrip = {
   title: "Test Road Trip",
   description: "A test trip for integration testing",
@@ -19,6 +19,23 @@ describe("Trip Model Integration Tests", () => {
   // Track created trip IDs for cleanup
   const createdTripIds: string[] = [];
 
+  // Owner user for all trip creates
+  let ownerId: string;
+
+  // Create a test owner before all tests
+  beforeAll(async () => {
+    const u = await prisma.user.upsert({
+      where: { email: "trip-model-test@example.com" },
+      update: {},
+      create: {
+        email: "trip-model-test@example.com",
+        passwordHash: "x",
+        name: "Test Owner",
+      },
+    });
+    ownerId = u.id;
+  });
+
   // Clean up test data after all tests
   afterAll(async () => {
     if (createdTripIds.length > 0) {
@@ -28,13 +45,17 @@ describe("Trip Model Integration Tests", () => {
         },
       });
     }
+    // Clean up the test owner (cascades to any remaining owned trips)
+    await prisma.user.deleteMany({
+      where: { email: "trip-model-test@example.com" },
+    });
     await prisma.$disconnect();
   });
 
   describe("CREATE operations", () => {
     it("should create a trip with all required fields", async () => {
       const trip = await prisma.trip.create({
-        data: testTrip,
+        data: { ...testTrip, ownerId },
       });
 
       createdTripIds.push(trip.id);
@@ -58,7 +79,7 @@ describe("Trip Model Integration Tests", () => {
       };
 
       const trip = await prisma.trip.create({
-        data: tripWithoutDescription,
+        data: { ...tripWithoutDescription, ownerId },
       });
 
       createdTripIds.push(trip.id);
@@ -74,6 +95,7 @@ describe("Trip Model Integration Tests", () => {
           title: "ID Test Trip",
           startDate: new Date("2026-08-01"),
           stopDate: new Date("2026-08-03"),
+          ownerId,
         },
       });
 
@@ -84,12 +106,13 @@ describe("Trip Model Integration Tests", () => {
 
     it("should set createdAt and updatedAt timestamps automatically", async () => {
       const beforeCreate = new Date();
-      
+
       const trip = await prisma.trip.create({
         data: {
           title: "Timestamp Test",
           startDate: new Date("2026-09-01"),
           stopDate: new Date("2026-09-03"),
+          ownerId,
         },
       });
 
@@ -114,6 +137,7 @@ describe("Trip Model Integration Tests", () => {
           description: "For testing read operations",
           startDate: new Date("2026-10-01"),
           stopDate: new Date("2026-10-10"),
+          ownerId,
         },
       });
       existingTripId = trip.id;
@@ -171,6 +195,7 @@ describe("Trip Model Integration Tests", () => {
           description: "Original description",
           startDate: new Date("2026-11-01"),
           stopDate: new Date("2026-11-05"),
+          ownerId,
         },
       });
       updateTestTripId = trip.id;
@@ -247,6 +272,7 @@ describe("Trip Model Integration Tests", () => {
           title: "Trip to Delete",
           startDate: new Date("2027-01-01"),
           stopDate: new Date("2027-01-05"),
+          ownerId,
         },
       });
 
@@ -283,6 +309,7 @@ describe("Trip Model Integration Tests", () => {
             title: longTitle,
             startDate: new Date("2027-02-01"),
             stopDate: new Date("2027-02-05"),
+            ownerId,
           },
         })
       ).rejects.toThrow();
@@ -296,6 +323,7 @@ describe("Trip Model Integration Tests", () => {
           title: maxTitle,
           startDate: new Date("2027-03-01"),
           stopDate: new Date("2027-03-05"),
+          ownerId,
         },
       });
 
@@ -315,6 +343,7 @@ describe("Trip Model Integration Tests", () => {
             title: `Index Test Trip ${i}`,
             startDate: new Date("2027-04-01"),
             stopDate: new Date("2027-04-05"),
+            ownerId,
           },
         })
       );

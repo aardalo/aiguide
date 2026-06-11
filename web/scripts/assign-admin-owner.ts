@@ -23,10 +23,9 @@ async function main() {
     create: { email, passwordHash: await hash(password), name: 'Admin', isAdmin: true },
   });
 
-  const trips = await prisma.trip.updateMany({
-    where: { ownerId: null },
-    data: { ownerId: admin.id },
-  });
+  // ownerId is NOT NULL in the schema (migration B applied); no ownerless trips
+  // can exist. Keep a zero-count result for the log line below.
+  const trips = { count: 0 };
 
   const devices = await prisma.device.updateMany({
     where: { userId: null },
