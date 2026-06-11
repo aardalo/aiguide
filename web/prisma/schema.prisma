@@ -7,22 +7,41 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model Device {
+  id          String   @id @default(cuid())
+  sessionId   String   @unique @db.VarChar(100) @map("session_id")
+  name        String   @db.VarChar(200)
+  lastSeenAt  DateTime @updatedAt @map("last_seen_at")
+  createdAt   DateTime @default(now())
+
+  dailyDestinations DailyDestination[]
+  dailyPois         DailyPoi[]
+  routeSegments     RouteSegment[]
+  routeWaypoints    RouteWaypoint[]
+  trips             Trip[]
+
+  @@map("devices")
+}
+
 model Trip {
-  id                 String             @id @default(cuid())
-  title              String             @db.VarChar(200)
-  description        String?
-  startDate          DateTime           @db.Date
-  stopDate           DateTime           @db.Date
-  createdAt          DateTime           @default(now())
-  updatedAt          DateTime           @updatedAt
-  planMode           Boolean            @default(false) @map("plan_mode")
-  routingPreferences String?            @map("routing_preferences")
-  dailyDestinations  DailyDestination[]
-  dailyPois          DailyPoi[]
-  routeSegments      RouteSegment[]
-  branches           Branch[]
+  id                      String             @id @default(cuid())
+  title                   String             @db.VarChar(200)
+  description             String?
+  startDate               DateTime           @db.Date
+  stopDate                DateTime           @db.Date
+  createdAt               DateTime           @default(now())
+  updatedAt               DateTime           @updatedAt
+  lastModifiedByDeviceId  String?            @map("last_modified_by_device_id")
+  planMode                Boolean            @default(false) @map("plan_mode")
+  routingPreferences      String?            @map("routing_preferences")
+  dailyDestinations       DailyDestination[]
+  dailyPois               DailyPoi[]
+  routeSegments           RouteSegment[]
+  branches                Branch[]
+  lastModifiedByDevice    Device?            @relation(fields: [lastModifiedByDeviceId], references: [id], onDelete: SetNull)
 
   @@index([createdAt])
+  @@index([lastModifiedByDeviceId])
   @@map("trips")
 }
 
@@ -34,6 +53,7 @@ model Branch {
   name      String   @db.VarChar(100)
   color     String   @db.VarChar(7)
   sortOrder Int      @default(0) @map("sort_order")
+  anchorDayDate DateTime @map("anchor_day_date") @db.Date
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
@@ -47,98 +67,111 @@ model Branch {
 }
 
 model DailyDestination {
-  id        String   @id @default(cuid())
-  tripId    String   @map("trip_id")
-  dayDate   DateTime @map("day_date") @db.Date
-  name         String   @db.VarChar(200)
-  municipality String?  @db.VarChar(200)
-  latitude     Float?
-  longitude    Float?
-  notes        String?
-  branchId     String?  @map("branch_id")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  trip         Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
-  branch       Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  id                      String   @id @default(cuid())
+  tripId                  String   @map("trip_id")
+  dayDate                 DateTime @map("day_date") @db.Date
+  name                    String   @db.VarChar(200)
+  municipality            String?  @db.VarChar(200)
+  latitude                Float?
+  longitude               Float?
+  notes                   String?
+  isLayover               Boolean  @default(false) @map("is_layover")
+  branchId                String?  @map("branch_id")
+  lastModifiedByDeviceId  String?  @map("last_modified_by_device_id")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  trip                    Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  branch                  Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  lastModifiedByDevice    Device?  @relation(fields: [lastModifiedByDeviceId], references: [id], onDelete: SetNull)
 
   @@index([tripId, dayDate, branchId])
   @@index([tripId])
   @@index([dayDate])
+  @@index([lastModifiedByDeviceId])
   @@map("daily_destinations")
 }
 
 /// One route segment per travel day — the leg from the previous night's
 /// destination to the current night's destination.
 model RouteSegment {
-  id                String          @id @default(cuid())
-  tripId            String          @map("trip_id")
+  id                      String          @id @default(cuid())
+  tripId                  String          @map("trip_id")
   /// The date this segment arrives at (day N). Day 1 has no segment.
-  dayDate           DateTime        @map("day_date") @db.Date
+  dayDate                 DateTime        @map("day_date") @db.Date
   /// ID of the DailyDestination this segment departs from (day N-1).
   /// Stored as plain string (not FK) so edits to a destination don't
   /// cascade-delete the segment — stale segments are upserted on next generation.
-  fromDestinationId String          @map("from_destination_id") @db.VarChar(30)
+  fromDestinationId       String          @map("from_destination_id") @db.VarChar(30)
   /// ID of the DailyDestination this segment arrives at (day N).
-  toDestinationId   String          @map("to_destination_id") @db.VarChar(30)
+  toDestinationId         String          @map("to_destination_id") @db.VarChar(30)
   /// Provider identifier at the time of generation, e.g. "ors", "mapbox".
-  provider          String          @db.VarChar(50)
-  distanceMeters    Float           @map("distance_meters")
-  durationSeconds   Float           @map("duration_seconds")
+  provider                String          @db.VarChar(50)
+  distanceMeters          Float           @map("distance_meters")
+  durationSeconds         Float           @map("duration_seconds")
   /// Google-encoded polyline for the full route geometry (nullable).
-  encodedPolyline   String?         @map("encoded_polyline")
-  branchId          String?         @map("branch_id")
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
-  trip              Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
-  branch            Branch?         @relation(fields: [branchId], references: [id], onDelete: Cascade)
-  waypoints         RouteWaypoint[]
+  encodedPolyline         String?         @map("encoded_polyline")
+  branchId                String?         @map("branch_id")
+  lastModifiedByDeviceId  String?         @map("last_modified_by_device_id")
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  trip                    Trip            @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  branch                  Branch?         @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  waypoints               RouteWaypoint[]
+  lastModifiedByDevice    Device?         @relation(fields: [lastModifiedByDeviceId], references: [id], onDelete: SetNull)
 
   @@index([tripId, dayDate, branchId])
   @@index([tripId])
+  @@index([lastModifiedByDeviceId])
   @@map("route_segments")
 }
 
 /// Auto-generated interval waypoints along a route segment, placed near
 /// major intersection turn-points at ~30-minute travel cadence (STORY-006).
 model RouteWaypoint {
-  id                    String       @id @default(cuid())
-  segmentId             String       @map("segment_id")
+  id                      String       @id @default(cuid())
+  segmentId               String       @map("segment_id")
   /// 0-based position within the ordered waypoint list for this segment
-  sequenceIndex         Int          @map("sequence_index")
-  latitude              Float
-  longitude             Float
+  sequenceIndex           Int          @map("sequence_index")
+  latitude                Float
+  longitude               Float
   /// The 30-minute interval mark this waypoint was generated for (seconds from start)
-  targetDurationSeconds Float        @map("target_duration_seconds")
+  targetDurationSeconds   Float        @map("target_duration_seconds")
   /// Cumulative travel time of the selected turn-point step (seconds from start)
-  actualDurationSeconds Float        @map("actual_duration_seconds")
-  createdAt             DateTime     @default(now())
-  updatedAt             DateTime     @updatedAt
+  actualDurationSeconds   Float        @map("actual_duration_seconds")
+  lastModifiedByDeviceId  String?      @map("last_modified_by_device_id")
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
   /// True when the user has manually dragged this waypoint to a new position.
-  isManual              Boolean      @default(false) @map("is_manual")
-  segment               RouteSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  isManual                Boolean      @default(false) @map("is_manual")
+  segment                 RouteSegment @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  lastModifiedByDevice    Device?      @relation(fields: [lastModifiedByDeviceId], references: [id], onDelete: SetNull)
 
   @@index([segmentId])
+  @@index([lastModifiedByDeviceId])
   @@map("route_waypoints")
 }
 
 /// A user-defined point of interest attached to a specific travel day.
 model DailyPoi {
-  id        String   @id @default(cuid())
-  tripId    String   @map("trip_id")
-  dayDate   DateTime @map("day_date") @db.Date
-  name      String   @db.VarChar(200)
-  latitude  Float
-  longitude Float
-  notes     String?
-  category  String   @default("poi") @db.VarChar(20)
-  branchId  String?  @map("branch_id")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
-  branch    Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  id                      String   @id @default(cuid())
+  tripId                  String   @map("trip_id")
+  dayDate                 DateTime @map("day_date") @db.Date
+  name                    String   @db.VarChar(200)
+  latitude                Float
+  longitude               Float
+  notes                   String?
+  category                String   @default("poi") @db.VarChar(20)
+  branchId                String?  @map("branch_id")
+  lastModifiedByDeviceId  String?  @map("last_modified_by_device_id")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  trip                    Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  branch                  Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  lastModifiedByDevice    Device?  @relation(fields: [lastModifiedByDeviceId], references: [id], onDelete: SetNull)
 
   @@index([tripId])
   @@index([dayDate])
+  @@index([lastModifiedByDeviceId])
   @@map("daily_pois")
 }
 

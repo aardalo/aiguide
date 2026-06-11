@@ -14,7 +14,7 @@
  */
 
 import { useState } from 'react';
-import { tripCreateSchema, type TripCreate } from '@/lib/schemas/trip';
+import { tripCreateSchema, tripUpdateSchema, type TripCreate } from '@/lib/schemas/trip';
 import type { TripResponse, RoutingPreferences } from '@/lib/schemas/trip';
 
 interface TripFormProps {
@@ -45,6 +45,20 @@ const normalizeDateForInput = (value?: string) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return '';
   return date.toISOString().split('T')[0];
+};
+
+const shiftIsoDate = (isoDate: string, offsetDays: number) => {
+  const date = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) return isoDate;
+  date.setUTCDate(date.getUTCDate() + offsetDays);
+  return date.toISOString().split('T')[0];
+};
+
+const isSameAvoid = (a: string[] | undefined, b: string[] | undefined) => {
+  const left = [...(a ?? [])].sort();
+  const right = [...(b ?? [])].sort();
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
 };
 
 export default function TripForm({
@@ -86,7 +100,28 @@ export default function TripForm({
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
   ) => {
     const { name, value } = e.target;
-    setFormData((prev) => ({ ...prev, [name]: value }));
+    setFormData((prev) => {
+      if (
+        isEditMode &&
+        name === 'startDate' &&
+        initialFormData.startDate &&
+        initialFormData.stopDate
+      ) {
+        const nextStart = new Date(`${value}T00:00:00Z`);
+        const originalStart = new Date(`${initialFormData.startDate}T00:00:00Z`);
+        if (!Number.isNaN(nextStart.getTime()) && !Number.isNaN(originalStart.getTime())) {
+          const offsetDays = Math.round(
+            (nextStart.getTime() - originalStart.getTime()) / (24 * 60 * 60 * 1000)
+          );
+          return {
+            ...prev,
+            startDate: value,
+            stopDate: shiftIsoDate(initialFormData.stopDate, offsetDays),
+          };
+        }
+      }
+      return { ...prev, [name]: value };
+    });
     
     // Clear error for this field when user starts typing
     if (errors[name]) {
@@ -111,8 +146,26 @@ export default function TripForm({
     setSubmitError(null);
     setSubmitSuccess(false);
 
-    // Client-side validation with Zod
-    const validation = tripCreateSchema.safeParse(formData);
+    const createPayload = {
+      ...formData,
+      routingPreferences: avoid.length > 0 ? { avoid } : undefined,
+    };
+
+    const editPayload: Record<string, unknown> = {};
+    if (formData.title !== initialFormData.title) editPayload.title = formData.title;
+    if ((formData.description || '') !== (initialFormData.description || '')) {
+      editPayload.description = formData.description;
+    }
+    if (formData.startDate !== initialFormData.startDate) editPayload.startDate = formData.startDate;
+
+    const initialAvoid = initialData?.routingPreferences?.avoid ?? [];
+    if (!isSameAvoid(avoid, initialAvoid)) {
+      editPayload.routingPreferences = avoid.length > 0 ? { avoid } : null;
+    }
+
+    const validation = isEditMode
+      ? tripUpdateSchema.safeParse(editPayload)
+      : tripCreateSchema.safeParse(createPayload);
     
     if (!validation.success) {
       // Extract field errors from Zod
@@ -132,10 +185,7 @@ export default function TripForm({
       const endpoint = isEditMode && tripId ? `/api/trips/${tripId}` : '/api/trips';
       const method = isEditMode ? 'PATCH' : 'POST';
 
-      const payload = {
-        ...validation.data,
-        routingPreferences: avoid.length > 0 ? { avoid } : undefined,
-      };
+      const payload = validation.data;
       const response = await fetch(endpoint, {
         method,
         headers: {
@@ -323,7 +373,7 @@ export default function TripForm({
             htmlFor="stopDate"
             className="block text-sm font-medium text-neutral-700 mb-1.5"
           >
-            End Date <span className="text-error-500">*</span>
+            End Date {isEditMode ? <span className="text-neutral-500 text-xs">(derived)</span> : <span className="text-error-500">*</span>}
           </label>
           <input
             type="date"
@@ -336,10 +386,15 @@ export default function TripForm({
                 ? 'border-error-300 focus:ring-error-500 bg-error-50'
                 : 'border-neutral-300 focus:ring-primary-500 focus:border-primary-500'
             }`}
-            disabled={isSubmitting}
+            disabled={isSubmitting || isEditMode}
           />
           {errors.stopDate && (
             <p className="text-sm text-error-600 mt-1.5">{errors.stopDate}</p>
+          )}
+          {isEditMode && (
+            <p className="text-xs text-neutral-500 mt-1.5">
+              End date follows the journey timeline. Change trip length by inserting or removing days.
+            </p>
           )}
         </div>
       </div>

@@ -1,5 +1,6 @@
 import type { DiscoveredExperience } from './types';
 import { chatGptResponseSchema } from '@/lib/schemas/discovery';
+import { repairJson } from './json-repair';
 
 const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses';
 const DEFAULT_MODEL = 'gpt-4o';
@@ -109,7 +110,13 @@ export async function callOpenAi(
         throw new Error('OpenAI response missing text content');
       }
 
-      const parsed = JSON.parse(content);
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(content) as Record<string, unknown>;
+      } catch {
+        console.warn('[discovery/openai] JSON truncated, attempting repair...');
+        parsed = repairJson(content) as Record<string, unknown>;
+      }
       const validated = chatGptResponseSchema.safeParse(parsed);
 
       if (!validated.success) {

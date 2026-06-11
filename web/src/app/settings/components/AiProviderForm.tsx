@@ -167,7 +167,7 @@ export default function AiProviderForm() {
           <input
             id="searxngUrl"
             type="url"
-            placeholder="http://192.168.1.17:8080"
+            placeholder="http://host:port"
             value={searxngUrl}
             onChange={(e) => setSearxngUrl(e.target.value)}
             className="flex-1 rounded-md border border-neutral-300 px-3 py-2 text-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-all"

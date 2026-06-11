@@ -30,6 +30,32 @@ Features include multi-provider routing (OSRM, ORS, Google, Mapbox), distance-ba
 
 ---
 
+## Environment Baseline (Informational)
+
+Use this as orientation only. Treat runtime details as mutable and verify before acting.
+
+- Typical host: Ubuntu VM with Docker Engine + Docker Compose available
+- Typical repo location: `/opt/web`
+- Default app runtime: Next.js dev server on host (`scripts/dev-server.sh start`), usually on port `3000`
+- Default data services: PostgreSQL and Neo4j in Docker via `docker-compose.yml`
+- Common default ports:
+    - App: `3000`
+    - PostgreSQL: `5432`
+    - Neo4j Browser/Bolt: `7474` / `7687`
+
+Before making assumptions, check live state with:
+
+```bash
+scripts/dev-server.sh status
+scripts/docker-services.sh status
+ss -tulpn
+docker ps
+```
+
+Do not hard-code volatile environment values (PIDs, IP addresses, container IDs, branch names, host-specific paths outside this repo) in code or instructions.
+
+---
+
 ## Repository Layout
 
 ```

@@ -79,6 +79,7 @@ export const tripResponseSchema = tripBaseSchema.extend({
   routingPreferences: routingPreferencesSchema.or(z.null()).optional(),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
+  lastModifiedByDeviceId: z.string().cuid().nullable().optional(),
 });
 
 /**
@@ -107,6 +108,7 @@ const dailyDestinationBaseSchema = z.object({
     .max(1000, "Notes must be 1000 characters or less")
     .nullable()
     .optional(),
+  isLayover: z.boolean().optional(),
 });
 
 /**
@@ -114,6 +116,7 @@ const dailyDestinationBaseSchema = z.object({
  */
 export const dailyDestinationCreateSchema = dailyDestinationBaseSchema.extend({
   branchId: z.string().cuid().nullable().optional(),
+  deviceId: z.string().cuid().optional(),
 });
 
 /**
@@ -137,7 +140,9 @@ export const dailyDestinationResponseSchema = z.object({
   latitude: z.number().min(-90).max(90).nullable(),
   longitude: z.number().min(-180).max(180).nullable(),
   notes: z.string().max(1000, "Notes must be 1000 characters or less").nullable(),
+  isLayover: z.boolean(),
   branchId: z.string().cuid().nullable().optional(),
+  lastModifiedByDeviceId: z.string().cuid().nullable().optional(),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
 });
@@ -180,6 +185,7 @@ export const dailyPoiCreateSchema = z.object({
   notes: z.string().max(1000).nullable().optional(),
   category: z.enum(['poi', 'parkup']).default('poi'),
   branchId: z.string().cuid().nullable().optional(),
+  deviceId: z.string().cuid().optional(),
 });
 
 export const dailyPoiResponseSchema = z.object({
@@ -192,6 +198,7 @@ export const dailyPoiResponseSchema = z.object({
   notes: z.string().nullable(),
   category: z.string().default('poi'),
   branchId: z.string().cuid().nullable().optional(),
+  lastModifiedByDeviceId: z.string().cuid().nullable().optional(),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
 });
@@ -221,6 +228,7 @@ export const branchResponseSchema = z.object({
   name: z.string(),
   color: z.string(),
   sortOrder: z.number().int(),
+  anchorDayDate: z.date().or(z.string().datetime()),
   createdAt: z.date().or(z.string().datetime()),
   updatedAt: z.date().or(z.string().datetime()),
 });

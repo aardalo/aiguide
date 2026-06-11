@@ -62,6 +62,10 @@ interface TripDetailProps {
   onPoiClick?: (poi: DailyPoiResponse) => void;
   /** Called when a destination name is clicked in the sidebar. */
   onDestinationClick?: (dest: DailyDestinationResponse) => void;
+  /** Called to show/clear the lower-right toast popup (AI search progress). */
+  onToast?: (text: string | null) => void;
+  /** Called when a via-point is clicked in the sidebar — zoom map to that location. */
+  onViaPointClick?: (lat: number, lng: number) => void;
   /** Callback when AI Research discovers experiences — used to show markers on map. */
   onExperiencesDiscovered?: (experiences: Array<{
     name: string;
@@ -97,6 +101,8 @@ export default function TripDetail({
   onTripDatesChange,
   onPoiClick,
   onDestinationClick,
+  onToast,
+  onViaPointClick,
   onExperiencesDiscovered,
 }: TripDetailProps) {
   const [trip, setTrip] = useState<TripResponse | null>(null);
@@ -117,26 +123,28 @@ export default function TripDetail({
 
   // Fetch trip details from API
   const fetchTripDetails = async (id: string) => {
-    setIsLoading(true);
+    // Only show loading spinner on initial load — not on refetch (avoids unmounting DailyDestinations)
+    const isRefresh = trip != null;
+    if (!isRefresh) setIsLoading(true);
     setError(null);
-    
+
     try {
       const response = await fetch(`/api/trips/${id}`);
-      
+
       if (!response.ok) {
         if (response.status === 404) {
           throw new Error('Trip not found');
         }
         throw new Error(`Failed to fetch trip: ${response.statusText}`);
       }
-      
+
       const data = await response.json();
       setTrip(data);
     } catch (err) {
       console.error('[TripDetail] Error fetching trip:', err);
       setError(err instanceof Error ? err.message : 'Failed to load trip');
     } finally {
-      setIsLoading(false);
+      if (!isRefresh) setIsLoading(false);
     }
   };
 
@@ -548,6 +556,9 @@ export default function TripDetail({
             }}
             onPoiClick={onPoiClick}
             onDestinationClick={onDestinationClick}
+            onStatusMessage={onStatusMessage}
+            onToast={onToast}
+            onViaPointClick={onViaPointClick}
           />
         )}
 
@@ -590,6 +601,20 @@ export default function TripDetail({
           </button>
           <p className="mt-1.5 text-xs text-neutral-500 text-center">
             Discover must-see experiences along this route
+          </p>
+        </div>
+
+        {/* Export */}
+        <div className="mt-6 border-t border-neutral-200 pt-4">
+          <a
+            href={`/api/trips/${trip.id}/export`}
+            download
+            className="block w-full rounded-md border border-neutral-300 bg-white px-4 py-2.5 text-center text-sm font-medium text-neutral-700 hover:bg-neutral-50 transition-all"
+          >
+            Export Trip (JSON)
+          </a>
+          <p className="mt-1.5 text-xs text-neutral-500 text-center">
+            Download this trip as a portable JSON file
           </p>
         </div>
 

@@ -50,6 +50,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Trip not found' }, { status: 404 });
     }
 
+    const dayDateObj = new Date(dayDate + 'T00:00:00.000Z');
+    const tripStart = new Date(trip.startDate);
+    const tripStop = new Date(trip.stopDate);
+    if (dayDateObj < tripStart || dayDateObj > tripStop) {
+      return NextResponse.json(
+        { error: 'dayDate must be within trip start and stop dates' },
+        { status: 400 },
+      );
+    }
+
     // Count existing branches for color assignment
     const existingCount = await prisma.branch.count({ where: { tripId } });
     const color = nextBranchColor(existingCount);
@@ -60,11 +70,12 @@ export async function POST(request: NextRequest) {
         name: name || `Branch ${existingCount + 1}`,
         color,
         sortOrder: existingCount,
+        anchorDayDate: dayDateObj,
       },
     });
 
-    // Create a blank destination for the branch on the starting day
-    const dayDateObj = new Date(dayDate + 'T00:00:00.000Z');
+    // Create a blank destination for the branch on the starting day.
+    // This first branch destination acts as the fork anchor day.
     await prisma.dailyDestination.create({
       data: {
         tripId,

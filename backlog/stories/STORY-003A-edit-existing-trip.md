@@ -28,9 +28,13 @@ Notes on unmet criteria:
 - Current edit flow is map-embedded, not route-based detail-to-edit navigation.
 - Route-based redirect/cancel behaviors remain pending with dedicated pages.
 
+Implementation note (June 8, 2026):
+- The shipped edit behavior now follows the derived timeline model: trip `startDate` is the anchor; `stopDate` is derived; changing start date shifts all trip day-scoped records.
+- A transient `500 Internal server error` observed during verification was traced to a stale dev server process after Prisma/schema updates. Restarting the server resolved it; the API implementation itself verified successfully afterward.
+
 ## Current implementation state
-As of 2026-03-02, edit is implemented as in-page edit mode on `/map` with `PATCH /api/trips/:id`.
-Gap to acceptance: dedicated `/trips/:id/edit` route and route-based redirect flow are not yet implemented.
+As of 2026-06-08, edit is implemented as in-page edit mode on `/map` with `PATCH /api/trips/:id`, timeline-shifting start-date updates, derived stop-date behavior, and branch anchor synchronization.
+Gap to acceptance remains only for dedicated `/trips/:id/edit` route and route-based redirect flow.
 
 ## Dependencies
 - [STORY-002A: Display trip list and detail](STORY-002A-display-trip-list-and-detail.md)

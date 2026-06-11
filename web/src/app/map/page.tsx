@@ -24,14 +24,28 @@ import NearbySearchModal from './components/NearbySearchModal';
 import TripadvisorSearchModal from './components/TripadvisorSearchModal';
 import FoursquareSearchModal from './components/FoursquareSearchModal';
 import StatusBar, { type StatusBarHandle } from './components/StatusBar';
+import ImportTripModal from './components/ImportTripModal';
 import MarkerFilterPane, { type MarkerFilterGroup, type MarkerVisibility } from './components/MarkerFilterPane';
 import PlacePopup from './components/PlacePopup';
+import MapTypeSwitcher from './components/MapTypeSwitcher';
+import SyncStatus from './components/SyncStatus';
+import { useDeviceIdentity } from '@/app/hooks/useDeviceIdentity';
+import { useTripsPolling, type ChangeItem } from '@/app/hooks/useTripsPolling';
 import type { TripResponse, DailyDestinationResponse, DailyPoiResponse, BranchResponse } from '@/lib/schemas/trip';
 import type { RouteSegmentResponse, RouteWaypointResponse } from '@/lib/schemas/routing';
 import type { NearbyPlace } from '@/lib/nearby/types';
 import type { PlaceResult } from '@/lib/schemas/geocoding';
 import { decodePolyline } from '@/lib/polyline';
 import { MAIN_BRANCH_COLOR } from '@/lib/branches';
+
+declare global {
+  interface Window {
+    __onGCastApiAvailable?: (isAvailable: boolean) => void;
+    cast?: any;
+    chrome?: any;
+    __googleMapsJsApiPromise?: Promise<void>;
+  }
+}
 
 // Small circular icons for draggable interval waypoint markers (STORY-007)
 // Auto-generated waypoints use a muted terracotta; manually-placed ones use blue.
@@ -161,29 +175,65 @@ if (typeof window !== 'undefined') {
  * Add the appropriate tile layer to the Leaflet map based on the selected provider.
  * Returns a promise that resolves once the tile layer has been added.
  */
+async function ensureGoogleMapsJsApiLoaded(tileKey: string): Promise<void> {
+  if ((window as any).google?.maps) return;
+
+  const existingScript = document.querySelector<HTMLScriptElement>(
+    'script[data-google-maps-js-api="true"]',
+  );
+
+  if (!window.__googleMapsJsApiPromise) {
+    window.__googleMapsJsApiPromise = new Promise<void>((resolve, reject) => {
+      if (existingScript) {
+        existingScript.addEventListener('load', () => resolve(), { once: true });
+        existingScript.addEventListener('error', () => {
+          window.__googleMapsJsApiPromise = undefined;
+          reject(new Error('Failed to load Google Maps JS API'));
+        }, { once: true });
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.dataset.googleMapsJsApi = 'true';
+      script.async = true;
+      script.defer = true;
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${tileKey}&libraries=places`;
+      script.onload = () => resolve();
+      script.onerror = () => {
+        window.__googleMapsJsApiPromise = undefined;
+        reject(new Error('Failed to load Google Maps JS API'));
+      };
+      document.head.appendChild(script);
+    }).then(() => {
+      if (!(window as any).google?.maps) {
+        window.__googleMapsJsApiPromise = undefined;
+        throw new Error('Google Maps JS API loaded without window.google.maps');
+      }
+    });
+  }
+
+  await window.__googleMapsJsApiPromise;
+}
+
 async function addTileLayer(
   L: any,
   map: any,
   mapProvider: string,
   tileKey: string | null,
+  initialType?: string,
 ): Promise<any> {
   if (mapProvider === 'google' && tileKey) {
     // Pre-load Google Maps JS API so googlemutant can find window.google.maps immediately.
-    await new Promise<void>((resolve) => {
-      if ((window as any).google?.maps) { resolve(); return; }
-      const s = document.createElement('script');
-      s.src = `https://maps.googleapis.com/maps/api/js?key=${tileKey}&libraries=places`;
-      s.onload = () => resolve();
-      document.head.appendChild(s);
-    });
+    await ensureGoogleMapsJsApiLoaded(tileKey);
     // v0.16+ exports the class as default; the window.L factory is not available in webpack.
     const { default: GoogleMutant } = await import('leaflet.gridlayer.googlemutant');
-    const mutantLayer = new (GoogleMutant as any)({ type: 'roadmap', maxZoom: 22 });
+    const mutantLayer = new (GoogleMutant as any)({ type: initialType ?? 'roadmap', maxZoom: 22 });
     mutantLayer.addTo(map);
     return mutantLayer;
   } else if (mapProvider === 'mapbox' && tileKey) {
-    L.tileLayer(
-      `https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/512/{z}/{x}/{y}?access_token=${tileKey}`,
+    const style = initialType ?? 'streets-v12';
+    const layer = L.tileLayer(
+      `https://api.mapbox.com/styles/v1/mapbox/${style}/tiles/512/{z}/{x}/{y}?access_token=${tileKey}`,
       {
         attribution:
           '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> ' +
@@ -193,19 +243,33 @@ async function addTileLayer(
         maxZoom: 22,
         minZoom: 3,
       },
-    ).addTo(map);
+    );
+    layer.addTo(map);
+    return layer;
   } else {
     // OpenStreetMap (default)
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    const layer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
       maxZoom: 19,
       minZoom: 3,
-    }).addTo(map);
+    });
+    layer.addTo(map);
+    return layer;
   }
 }
 
 type SidebarView = 'create' | 'list' | 'detail' | 'edit';
+
+const CAST_NAMESPACE = 'urn:x-cast:com.aardest.map';
+const CAST_APP_ID = process.env.NEXT_PUBLIC_CAST_APP_ID ?? '';
+
+type CastConnectionState =
+  | 'unsupported'
+  | 'idle'
+  | 'connecting'
+  | 'connected'
+  | 'error';
 
 // ── localStorage persistence ────────────────────────────────────────────────
 const STORAGE_KEY = 'tripPlanner:uiState';
@@ -269,7 +333,23 @@ export default function MapPage() {
   const [isMapReady, setIsMapReady] = useState(false);
   const restoredRef = useRef<PersistedState | null>(null);
 
+  // Map type/layer switching
+  const tileLayerRef = useRef<any>(null);
+  const mapProviderRef = useRef<string>('osm');
+  const tileKeyRef = useRef<string | null>(null);
+  const leafletRef = useRef<any>(null);
+  const [mapType, setMapType] = useState<string>('');
+
   // Sidebar state
+  const SIDEBAR_MIN = 280;
+  const SIDEBAR_MAX = 700;
+  const SIDEBAR_DEFAULT = 384;
+  const TOUCH_MODE_BREAKPOINT = 1024;
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT);
+  const [viewportWidth, setViewportWidth] = useState(TOUCH_MODE_BREAKPOINT);
+  const [touchSidebarOpen, setTouchSidebarOpen] = useState(false);
+  const isDraggingRef = useRef(false);
+  const isTouchMode = viewportWidth < TOUCH_MODE_BREAKPOINT;
   const [sidebarView, setSidebarView] = useState<SidebarView>('create');
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
   // Ref mirror so Leaflet event handlers always see the latest value
@@ -279,7 +359,47 @@ export default function MapPage() {
   
   // Trips dropdown menu state
   const [tripsMenuOpen, setTripsMenuOpen] = useState(false);
+  const [importModalOpen, setImportModalOpen] = useState(false);
   const tripsMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleResize = () => setViewportWidth(window.innerWidth);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isTouchMode) {
+      setTouchSidebarOpen(false);
+    }
+    mapRef.current?.invalidateSize({ animate: false });
+  }, [isTouchMode, touchSidebarOpen]);
+
+  useEffect(() => {
+    const invalidate = () => {
+      if (!mapRef.current) return;
+      mapRef.current.invalidateSize({ animate: false });
+    };
+
+    const onResize = () => {
+      requestAnimationFrame(() => {
+        invalidate();
+      });
+    };
+
+    window.addEventListener('resize', onResize);
+    window.addEventListener('orientationchange', onResize);
+    window.visualViewport?.addEventListener('resize', onResize);
+
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('orientationchange', onResize);
+      window.visualViewport?.removeEventListener('resize', onResize);
+    };
+  }, []);
+
   useEffect(() => {
     if (!tripsMenuOpen) return;
     const handleClick = (e: MouseEvent) => {
@@ -326,10 +446,22 @@ export default function MapPage() {
   // one for the DailyDestinations re-fetch callback), and handleRouteData
   // decrements by 1 each time it runs.
   const skipFitBoundsRef = useRef(0);
+  // When set, handleRouteData zooms to this day's points instead of the whole trip.
+  const pendingZoomDayDateRef = useRef<string | null>(null);
   // Incrementing this causes DailyDestinations to re-fetch segments from DB
   const [segmentRefreshTrigger, setSegmentRefreshTrigger] = useState(0);
   // Incrementing this causes DailyDestinations to re-fetch destinations + regenerate routes
   const [destinationRefreshTrigger, setDestinationRefreshTrigger] = useState(0);
+
+  // ── Cross-device synchronization ───────────────────────────────────────────
+  // Identify this device so mutations can be attributed and changes from other
+  // devices can be surfaced in the UI.
+  const { deviceId, deviceName } = useDeviceIdentity();
+  // Keep a ref mirror so async callbacks always read the latest device id.
+  const deviceIdRef = useRef<string | null>(null);
+  useEffect(() => { deviceIdRef.current = deviceId; }, [deviceId]);
+  // Most recent batch of remote changes, surfaced by the SyncStatus indicator.
+  const [recentChanges, setRecentChanges] = useState<ChangeItem[]>([]);
 
   // ── Search Nearby state ────────────────────────────────────────────────────
   // Context menu shown at the map click position
@@ -354,6 +486,16 @@ export default function MapPage() {
   // Foursquare search state
   const [showFoursquareModal, setShowFoursquareModal] = useState(false);
   const foursquareEnabledRef = useRef(false);
+  const [castState, setCastState] = useState<CastConnectionState>('unsupported');
+  const castSessionRef = useRef<any>(null);
+  const lastCastPayloadRef = useRef<string>('');
+  const castStateLabel = castState === 'connected'
+    ? 'Casting On'
+    : castState === 'connecting'
+      ? 'Casting...'
+      : castState === 'error'
+        ? 'Casting Error'
+        : 'Cast to TV';
   // AI-discovered experiences state
   const [experienceResults, setExperienceResults] = useState<DiscoveredExperienceMarker[]>([]);
   const experienceLayerRef = useRef<any>(null); // eslint-disable-line @typescript-eslint/no-explicit-any -- Leaflet LayerGroup
@@ -408,37 +550,149 @@ export default function MapPage() {
   // Flag set by Google Maps IconMouseEvent handler to suppress Leaflet's click
   const googlePoiClickedRef = useRef(false);
 
+  // ── Sidebar resize drag handler ─────────────────────────────────────────────
+  const handleSidebarDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const delta = startX - ev.clientX;
+      const newWidth = Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, startWidth + delta));
+      setSidebarWidth(newWidth);
+      mapRef.current?.invalidateSize({ animate: false });
+    };
+
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      // Tell Leaflet the map container changed size
+      mapRef.current?.invalidateSize();
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [sidebarWidth]);
+
   // ── Place search bar state ─────────────────────────────────────────────────
   const [placeSearchQuery, setPlaceSearchQuery] = useState('');
   const [placeSearchResults, setPlaceSearchResults] = useState<PlaceResult[]>([]);
   const [placeSearching, setPlaceSearching] = useState(false);
   const [placeSearchOpen, setPlaceSearchOpen] = useState(false);
+  const [placeSearchNoResults, setPlaceSearchNoResults] = useState(false);
   const placeSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const placeSearchAbortRef = useRef<AbortController | null>(null);
 
   const handlePlaceSearchChange = useCallback((value: string) => {
     setPlaceSearchQuery(value);
+    setPlaceSearchNoResults(false);
+    statusBarRef.current?.clearToast();
     if (placeSearchTimerRef.current) clearTimeout(placeSearchTimerRef.current);
+    if (placeSearchAbortRef.current) { placeSearchAbortRef.current.abort(); placeSearchAbortRef.current = null; }
     if (value.trim().length < 3) {
       setPlaceSearchResults([]);
       setPlaceSearchOpen(false);
       return;
     }
     placeSearchTimerRef.current = setTimeout(async () => {
+      const abortController = new AbortController();
+      placeSearchAbortRef.current = abortController;
+      const signal = abortController.signal;
+
+      const geocode = async (query: string): Promise<PlaceResult[]> => {
+        const res = await fetch(`/api/geocode?q=${encodeURIComponent(query)}&limit=5`, { signal });
+        if (!res.ok) return [];
+        return res.json();
+      };
+
       setPlaceSearching(true);
       try {
-        const res = await fetch(`/api/geocode?q=${encodeURIComponent(value.trim())}&limit=5`);
-        if (res.ok) {
-          const data: PlaceResult[] = await res.json();
-          setPlaceSearchResults(data);
-          setPlaceSearchOpen(data.length > 0);
+        const trimmed = value.trim();
+
+        // Step 1: Direct Nominatim search
+        statusBarRef.current?.pushStatus(`Searching for "${trimmed}"...`);
+        const directResults = await geocode(trimmed);
+        if (signal.aborted) return;
+
+        if (directResults.length > 0) {
+          setPlaceSearchResults(directResults);
+          setPlaceSearchOpen(true);
+          statusBarRef.current?.pushStatus(`Found ${directResults.length} result${directResults.length > 1 ? 's' : ''}`);
+          return;
         }
-      } catch {
+
+        // Step 2: AI identify the place from the description
+        statusBarRef.current?.showToast('No results — asking AI to identify the place...');
+        const aiRes = await fetch('/api/geocode/ai-identify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: trimmed }),
+          signal,
+        });
+        if (signal.aborted) return;
+
+        if (!aiRes.ok) {
+          setPlaceSearchNoResults(true);
+          statusBarRef.current?.showToast(`AI identification failed (status ${aiRes.status})`);
+          return;
+        }
+
+        const aiResult = await aiRes.json();
+        if (signal.aborted) return;
+
+        if (!aiResult.name) {
+          setPlaceSearchNoResults(true);
+          statusBarRef.current?.showToast('AI could not identify the place');
+          return;
+        }
+
+        statusBarRef.current?.showToast(`AI identified: ${aiResult.name}\n${aiResult.reasoning}`);
+
+        // Step 3: Feed the AI name back into the search field and geocode it
+        setPlaceSearchQuery(aiResult.name);
+        const aiGeocodeResults = await geocode(aiResult.searchQuery);
+        if (signal.aborted) return;
+
+        if (aiGeocodeResults.length > 0) {
+          setPlaceSearchResults(aiGeocodeResults);
+          setPlaceSearchOpen(true);
+          statusBarRef.current?.showToast(`AI identified: ${aiResult.name}\n${aiResult.reasoning}\n\nFound ${aiGeocodeResults.length} result${aiGeocodeResults.length > 1 ? 's' : ''}`);
+          // Auto-zoom the map to the first result so the user can evaluate the place
+          const first = aiGeocodeResults[0];
+          if (mapRef.current) {
+            const L = (window as unknown as Record<string, unknown>).L as typeof import('leaflet');
+            mapRef.current.setView([first.latitude, first.longitude], 13, { animate: true });
+            const tempMarker = L.marker([first.latitude, first.longitude], {
+              icon: L.divIcon({
+                className: '',
+                html: '<div style="width:14px;height:14px;border-radius:50%;background:#c0392b;border:3px solid white;box-shadow:0 1px 4px rgba(0,0,0,.4)"></div>',
+                iconSize: [14, 14],
+                iconAnchor: [7, 7],
+              }),
+            });
+            tempMarker.addTo(mapRef.current);
+            tempMarker.bindTooltip(first.displayName, { permanent: true, direction: 'top', offset: [0, -10] }).openTooltip();
+            setTimeout(() => tempMarker.remove(), 8000);
+          }
+        } else {
+          setPlaceSearchNoResults(true);
+          statusBarRef.current?.showToast(`AI identified: ${aiResult.name}\n${aiResult.reasoning}\n\nCould not find in geocoding`);
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
         // silently degrade
       } finally {
-        setPlaceSearching(false);
+        if (!signal.aborted) setPlaceSearching(false);
       }
     }, 400);
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handlePlaceSelect = useCallback((place: PlaceResult) => {
     setPlaceSearchOpen(false);
@@ -689,11 +943,63 @@ export default function MapPage() {
     });
   }, [selectedTripId]);
 
+  // ── Cross-device sync: refetch trip POIs from the server ────────────────────
+  const refetchTripPois = useCallback((tripId: string) => {
+    fetch(`/api/daily-pois?tripId=${tripId}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((pois) => { if (Array.isArray(pois)) setTripPois(pois); })
+      .catch(() => {});
+  }, []);
+
+  // When the polling hook reports changes made on another device, refetch the
+  // affected data and bump the refresh triggers so child components reload.
+  // Changes attributed to this device are ignored to avoid clobbering local
+  // optimistic state.
+  const handleRemoteChanges = useCallback((changes: ChangeItem[]) => {
+    const tripId = selectedTripIdRef.current;
+    if (!tripId) return;
+
+    const myDeviceId = deviceIdRef.current;
+    const remoteChanges = changes.filter(
+      (c) => c.lastModifiedByDeviceId !== myDeviceId,
+    );
+    if (remoteChanges.length === 0) return;
+
+    setRecentChanges(remoteChanges);
+
+    const types = new Set(remoteChanges.map((c) => c.type));
+
+    if (types.has('poi')) {
+      refetchTripPois(tripId);
+    }
+    if (types.has('destination') || types.has('trip')) {
+      setDestinationRefreshTrigger((prev) => prev + 1);
+    }
+    if (types.has('route_segment') || types.has('route_waypoint')) {
+      setSegmentRefreshTrigger((prev) => prev + 1);
+    }
+
+    // Surface a lightweight notification about who made the change.
+    const named = remoteChanges.find((c) => c.deviceName);
+    if (named?.deviceName) {
+      statusBarRef.current?.pushStatus(`Synced changes from ${named.deviceName}`);
+    }
+  }, [refetchTripPois]);
+
+  // Poll for changes whenever a trip is open. Disabled when no trip selected.
+  const { isPolling, lastSyncTime, error: syncError } = useTripsPolling(
+    selectedTripId,
+    handleRemoteChanges,
+    3000,
+    !!selectedTripId,
+  );
+
   const handleTripCreated = (trip: any) => {
     console.log('[MapPage] Trip created:', trip);
     setRefreshTrigger((prev) => prev + 1);
     // Switch to list view to show the new trip
     setSidebarView('list');
+    if (isTouchMode) setTouchSidebarOpen(true);
   };
 
   const handleTripSelect = (trip: TripResponse) => {
@@ -710,6 +1016,7 @@ export default function MapPage() {
     setMarkerHidden({});
     setSelectedTripId(trip.id);
     setSidebarView('detail');
+    if (isTouchMode) setTouchSidebarOpen(true);
     // Fetch POIs for this trip
     fetch(`/api/daily-pois?tripId=${trip.id}`)
       .then((r) => (r.ok ? r.json() : []))
@@ -731,19 +1038,23 @@ export default function MapPage() {
     setMarkerHidden({});
     setSelectedTripId(null);
     setSidebarView('list');
+    if (isTouchMode) setTouchSidebarOpen(true);
   };
 
   const handleEdit = (trip: TripResponse) => {
     setEditingTrip(trip);
     setSidebarView('edit');
+    if (isTouchMode) setTouchSidebarOpen(true);
   };
 
   const handleEditCancel = () => {
     if (selectedTripId) {
       setSidebarView('detail');
+      if (isTouchMode) setTouchSidebarOpen(true);
       return;
     }
     setSidebarView('list');
+    if (isTouchMode) setTouchSidebarOpen(true);
   };
 
   const handleTripUpdated = (trip: TripResponse) => {
@@ -751,11 +1062,56 @@ export default function MapPage() {
     setSelectedTripId(trip.id);
     setRefreshTrigger((prev) => prev + 1);
     setSidebarView('detail');
+    if (isTouchMode) setTouchSidebarOpen(true);
   };
 
   const handleDeleteClick = (trip: TripResponse) => {
     setTripToDelete(trip);
   };
+
+  // ─── Map type switching ─────────────────────────────────────────────────────
+
+  const MAP_TYPE_STORAGE_KEY = 'tripPlanner:mapType';
+
+  const handleSwitchMapType = useCallback((newType: string) => {
+    const map = mapRef.current;
+    const provider = mapProviderRef.current;
+    if (!map || !provider) return;
+
+    if (provider === 'google' && tileLayerRef.current) {
+      const gmap = tileLayerRef.current._mutant;
+      if (gmap) {
+        gmap.setMapTypeId(newType);
+        // Clear the GoogleMutant tile cache and force Leaflet to re-request all tiles
+        if (tileLayerRef.current._lru) tileLayerRef.current._lru.clear();
+        tileLayerRef.current._tileCallbacks = {};
+        tileLayerRef.current.redraw();
+      }
+    } else if (provider === 'mapbox' && tileKeyRef.current && leafletRef.current) {
+      if (tileLayerRef.current) map.removeLayer(tileLayerRef.current);
+      const newLayer = leafletRef.current.tileLayer(
+        `https://api.mapbox.com/styles/v1/mapbox/${newType}/tiles/512/{z}/{x}/{y}?access_token=${tileKeyRef.current}`,
+        {
+          attribution:
+            '&copy; <a href="https://www.mapbox.com/about/maps/">Mapbox</a> ' +
+            '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+          tileSize: 512,
+          zoomOffset: -1,
+          maxZoom: 22,
+          minZoom: 3,
+        },
+      );
+      newLayer.addTo(map);
+      tileLayerRef.current = newLayer;
+    }
+
+    setMapType(newType);
+    try {
+      const stored = JSON.parse(localStorage.getItem(MAP_TYPE_STORAGE_KEY) || '{}');
+      stored[provider] = newType;
+      localStorage.setItem(MAP_TYPE_STORAGE_KEY, JSON.stringify(stored));
+    } catch { /* ignore */ }
+  }, []);
 
   // ─── Map route drawing ──────────────────────────────────────────────────────
 
@@ -806,6 +1162,7 @@ export default function MapPage() {
         const captured = place;
         marker.on('click', (e: any) => {
           L.DomEvent.stopPropagation(e);
+          setSelectedExperienceRef.current(null);
           setSelectedNearbyPlaceRef.current(captured);
         });
         marker.addTo(layer);
@@ -845,6 +1202,7 @@ export default function MapPage() {
         const captured = exp;
         marker.on('click', (e: L.LeafletEvent) => {
           L.DomEvent.stopPropagation(e);
+          setSelectedNearbyPlaceRef.current(null);
           setSelectedExperienceRef.current(captured);
         });
         marker.addTo(layer);
@@ -898,6 +1256,9 @@ export default function MapPage() {
       // Read and decrement the skip-fit counter synchronously before the async import
       const shouldFit = skipFitBoundsRef.current === 0;
       if (skipFitBoundsRef.current > 0) skipFitBoundsRef.current--;
+      // Capture and clear any pending day-specific zoom target
+      const zoomDayDate = pendingZoomDayDateRef.current;
+      pendingZoomDayDateRef.current = null;
 
       // Fetch branches for color lookups
       const tripId = destinations[0]?.tripId ?? segments[0]?.tripId;
@@ -931,21 +1292,26 @@ export default function MapPage() {
               iconSize: [28, 28],
               iconAnchor: [14, 14],
             }),
+            zIndexOffset: 700,
           }).bindTooltip(home.name, { permanent: false, direction: 'top', offset: [0, -14] });
           destMarkersRef.current.set('home', { marker: homeMarker, label: 'H', color: MAIN_BRANCH_COLOR });
           homeMarker.addTo(group);
         }
 
         const sortedDests = [...destinations]
-          .filter((d) => d.latitude != null && d.longitude != null)
+          .filter((d) => d.latitude != null && d.longitude != null && !d.isLayover)
           .sort((a, b) => new Date(a.dayDate).getTime() - new Date(b.dayDate).getTime());
 
-        // Separate main vs branch destinations for numbering
-        const mainDests = sortedDests.filter((d) => !d.branchId);
-        // Build a map of date string → day number from main destinations
+        // Build a map of date string → day number using trip start date
+        const tripStart = currentTripDatesRef.current?.start;
+        const tripStartMs = tripStart ? new Date(tripStart + 'T00:00:00').getTime() : null;
         const dateToDayNum = new Map<string, number>();
-        mainDests.forEach((d, i) => {
-          dateToDayNum.set(new Date(d.dayDate).toISOString().split('T')[0], i + 1);
+        sortedDests.forEach((d) => {
+          const dateStr = new Date(d.dayDate).toISOString().split('T')[0];
+          if (!dateToDayNum.has(dateStr) && tripStartMs != null) {
+            const dayMs = new Date(dateStr + 'T00:00:00').getTime();
+            dateToDayNum.set(dateStr, Math.round((dayMs - tripStartMs) / 86_400_000) + 1);
+          }
         });
         // Build a map of branchId → branch number (sortOrder + 1)
         const branchNumMap = new Map<string, number>();
@@ -971,6 +1337,7 @@ export default function MapPage() {
               iconSize: [28, 28],
               iconAnchor: [14, 14],
             }),
+            zIndexOffset: 700,
           }).bindTooltip(dest.name, { permanent: false, direction: 'top', offset: [0, -14] });
           destMarkersRef.current.set(dest.id, { marker: destMarker, label, color });
           destMarker.addTo(group);
@@ -1053,7 +1420,21 @@ export default function MapPage() {
             .filter((d) => d.latitude != null && d.longitude != null)
             .map((d) => [d.latitude!, d.longitude!] as [number, number]),
         ];
-        if (shouldFit && allPoints.length > 0) {
+        if (zoomDayDate) {
+          // Zoom to only the newly-added destination's day
+          const dayPoints: [number, number][] = [];
+          for (const seg of segments) {
+            if (new Date(seg.dayDate).toISOString().split('T')[0] === zoomDayDate && seg.encodedPolyline) {
+              dayPoints.push(...decodePolyline(seg.encodedPolyline));
+            }
+          }
+          destinations
+            .filter((d) => new Date(d.dayDate).toISOString().split('T')[0] === zoomDayDate && d.latitude != null && d.longitude != null)
+            .forEach((d) => dayPoints.push([d.latitude!, d.longitude!]));
+          if (dayPoints.length > 0) {
+            mapRef.current.fitBounds(L.latLngBounds(dayPoints), { padding: [60, 60], maxZoom: 14 });
+          }
+        } else if (shouldFit && allPoints.length > 0) {
           mapRef.current.fitBounds(L.latLngBounds(allPoints), { padding: [40, 40] });
         }
       });
@@ -1201,6 +1582,7 @@ export default function MapPage() {
             lng: nearbySearchPos.lng,
             radiusMeters,
             ...(category ? { category } : {}),
+        deviceId: deviceIdRef.current || undefined,
           }),
         });
         const data = await res.json();
@@ -1304,6 +1686,149 @@ export default function MapPage() {
     }
   }, []);
 
+  const sendCastViewport = useCallback((map: any, force = false) => {
+    if (!map) return;
+    const session = castSessionRef.current;
+    if (!session) return;
+
+    const center = map.getCenter();
+    const payload: {
+      lat: number;
+      lng: number;
+      zoom: number;
+      bearing?: number;
+      pitch?: number;
+      ts: number;
+    } = {
+      lat: center.lat,
+      lng: center.lng,
+      zoom: Math.round(map.getZoom()),
+      ts: Date.now(),
+    };
+
+    if (typeof map.getBearing === 'function') {
+      payload.bearing = map.getBearing();
+    }
+    if (typeof map.getPitch === 'function') {
+      payload.pitch = map.getPitch();
+    }
+
+    const dedupeKey = `${payload.lat.toFixed(6)}:${payload.lng.toFixed(6)}:${payload.zoom}:${payload.bearing ?? ''}:${payload.pitch ?? ''}`;
+    if (!force && dedupeKey === lastCastPayloadRef.current) return;
+
+    lastCastPayloadRef.current = dedupeKey;
+    session.sendMessage(CAST_NAMESPACE, payload).catch((err: unknown) => {
+      setCastState('error');
+      statusBarRef.current?.pushStatus('Cast sync failed', String(err));
+    });
+  }, []);
+
+  const syncCastNow = useCallback(() => {
+    if (!mapRef.current || !castSessionRef.current) return;
+    sendCastViewport(mapRef.current, true);
+    statusBarRef.current?.pushStatus('Cast view synced');
+  }, [sendCastViewport]);
+
+  const startCasting = useCallback(async () => {
+    if (!window.cast?.framework || !CAST_APP_ID) {
+      statusBarRef.current?.pushStatus('Cast is not configured', 'Missing NEXT_PUBLIC_CAST_APP_ID');
+      return;
+    }
+    try {
+      setCastState('connecting');
+      const ctx = window.cast.framework.CastContext.getInstance();
+      await ctx.requestSession();
+    } catch (err) {
+      setCastState('error');
+      statusBarRef.current?.pushStatus('Unable to start casting', String(err));
+    }
+  }, []);
+
+  const stopCasting = useCallback(() => {
+    const ctx = window.cast?.framework?.CastContext?.getInstance?.();
+    if (!ctx) return;
+    ctx.endCurrentSession(true);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const setupCast = () => {
+      if (!window.cast?.framework) {
+        setCastState('unsupported');
+        return () => {};
+      }
+      if (!CAST_APP_ID) {
+        setCastState('unsupported');
+        return () => {};
+      }
+
+      const castContext = window.cast.framework.CastContext.getInstance();
+      castContext.setOptions({
+        receiverApplicationId: CAST_APP_ID,
+        autoJoinPolicy: window.chrome?.cast?.AutoJoinPolicy?.ORIGIN_SCOPED,
+      });
+
+      setCastState('idle');
+
+      const onSessionChange = () => {
+        const state = castContext.getSessionState();
+        const session = castContext.getCurrentSession();
+        castSessionRef.current = session;
+
+        if (state === window.cast.framework.SessionState.SESSION_STARTED || state === window.cast.framework.SessionState.SESSION_RESUMED) {
+          setCastState('connected');
+          if (mapRef.current) sendCastViewport(mapRef.current, true);
+          return;
+        }
+        if (state === window.cast.framework.SessionState.SESSION_STARTING) {
+          setCastState('connecting');
+          return;
+        }
+        if (state === window.cast.framework.SessionState.SESSION_ENDED) {
+          castSessionRef.current = null;
+          setCastState('idle');
+          return;
+        }
+      };
+
+      castContext.addEventListener(window.cast.framework.CastContextEventType.SESSION_STATE_CHANGED, onSessionChange);
+
+      return () => {
+        castContext.removeEventListener(window.cast.framework.CastContextEventType.SESSION_STATE_CHANGED, onSessionChange);
+      };
+    };
+
+    if (window.cast?.framework) {
+      return setupCast();
+    }
+
+    const existingScript = document.querySelector('script[data-cast-sdk="sender"]') as HTMLScriptElement | null;
+    const script = existingScript ?? document.createElement('script');
+    script.setAttribute('data-cast-sdk', 'sender');
+    script.src = 'https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1';
+    script.async = true;
+
+    let cleanup: (() => void) | undefined;
+
+    window.__onGCastApiAvailable = (isAvailable: boolean) => {
+      if (!isAvailable) {
+        setCastState('unsupported');
+        return;
+      }
+      cleanup = setupCast();
+    };
+
+    if (!existingScript) {
+      document.head.appendChild(script);
+    }
+
+    return () => {
+      if (cleanup) cleanup();
+      window.__onGCastApiAvailable = undefined;
+    };
+  }, [sendCastViewport]);
+
   const handleAiResearchArea = useCallback(async () => {
     if (!mapRef.current) return;
     setContextMenu(null);
@@ -1381,7 +1906,7 @@ export default function MapPage() {
   }, []);
 
   const handleNearbySearch = useCallback(
-    async (type: string) => {
+    async (types: string[]) => {
       if (!nearbySearchPos || !mapRef.current) return;
       setShowNearbyModal(false);
       setNearbyResults([]);
@@ -1398,7 +1923,7 @@ export default function MapPage() {
         const res = await fetch('/api/nearby-search', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lat: nearbySearchPos.lat, lng: nearbySearchPos.lng, radiusMeters, type }),
+          body: JSON.stringify({ lat: nearbySearchPos.lat, lng: nearbySearchPos.lng, radiusMeters, types }),
         });
         if (res.ok) {
           const data = await res.json();
@@ -1430,6 +1955,7 @@ export default function MapPage() {
           body: JSON.stringify({
             latitude: selectedNearbyPlace.lat,
             longitude: selectedNearbyPlace.lng,
+            deviceId: deviceIdRef.current || undefined,
           }),
         });
         if (!res.ok) {
@@ -1471,6 +1997,7 @@ export default function MapPage() {
               municipality,
               latitude: selectedNearbyPlace.lat,
               longitude: selectedNearbyPlace.lng,
+              deviceId: deviceIdRef.current || undefined,
             }),
           });
         } else {
@@ -1486,6 +2013,7 @@ export default function MapPage() {
                 name: oldDest.name,
                 latitude: oldDest.latitude,
                 longitude: oldDest.longitude,
+                deviceId: deviceIdRef.current || undefined,
               }),
             });
             if (poiRes.ok) {
@@ -1501,6 +2029,7 @@ export default function MapPage() {
               municipality,
               latitude: selectedNearbyPlace.lat,
               longitude: selectedNearbyPlace.lng,
+              deviceId: deviceIdRef.current || undefined,
             }),
           });
         }
@@ -1508,6 +2037,14 @@ export default function MapPage() {
           console.error('[MapPage] Add as destination failed:', res.status);
           return;
         }
+        // Zoom to the affected day after the route update
+        const zoomDate = isDate
+          ? destinationIdOrDate
+          : (() => {
+              const d = currentDestinationsRef.current.find((x) => x.id === destinationIdOrDate);
+              return d ? new Date(d.dayDate).toISOString().split('T')[0] : null;
+            })();
+        if (zoomDate) pendingZoomDayDateRef.current = zoomDate;
         // Re-fetch destinations and regenerate routes to reflect the new coordinates
         setDestinationRefreshTrigger((prev) => prev + 1);
         setSelectedNearbyPlace(null);
@@ -1535,6 +2072,7 @@ export default function MapPage() {
             name: selectedNearbyPlace.name,
             latitude: selectedNearbyPlace.lat,
             longitude: selectedNearbyPlace.lng,
+            deviceId: deviceIdRef.current || undefined,
           }),
         });
         if (res.ok) {
@@ -1565,6 +2103,7 @@ export default function MapPage() {
             latitude: selectedNearbyPlace.lat,
             longitude: selectedNearbyPlace.lng,
             category: 'parkup',
+            deviceId: deviceIdRef.current || undefined,
           }),
         });
         if (res.ok) {
@@ -1595,6 +2134,7 @@ export default function MapPage() {
           body: JSON.stringify({
             latitude: selectedExperience.approximateLat,
             longitude: selectedExperience.approximateLng,
+            deviceId: deviceIdRef.current || undefined,
           }),
         });
         if (!res.ok) {
@@ -1634,6 +2174,7 @@ export default function MapPage() {
               name: selectedExperience.name,
               latitude: selectedExperience.approximateLat,
               longitude: selectedExperience.approximateLng,
+              deviceId: deviceIdRef.current || undefined,
             }),
           });
         } else {
@@ -1649,6 +2190,7 @@ export default function MapPage() {
                 name: oldDest.name,
                 latitude: oldDest.latitude,
                 longitude: oldDest.longitude,
+                deviceId: deviceIdRef.current || undefined,
               }),
             });
             if (poiRes.ok) {
@@ -1663,6 +2205,7 @@ export default function MapPage() {
               name: selectedExperience.name,
               latitude: selectedExperience.approximateLat,
               longitude: selectedExperience.approximateLng,
+              deviceId: deviceIdRef.current || undefined,
             }),
           });
         }
@@ -1670,6 +2213,14 @@ export default function MapPage() {
           console.error('[MapPage] Add experience as destination failed:', res.status);
           return;
         }
+        // Zoom to the affected day after the route update
+        const zoomDate = isDate
+          ? destinationIdOrDate
+          : (() => {
+              const d = currentDestinationsRef.current.find((x) => x.id === destinationIdOrDate);
+              return d ? new Date(d.dayDate).toISOString().split('T')[0] : null;
+            })();
+        if (zoomDate) pendingZoomDayDateRef.current = zoomDate;
         setDestinationRefreshTrigger((prev) => prev + 1);
         setSelectedExperience(null);
         statusBarRef.current?.pushStatus(`Added "${selectedExperience.name}" as destination`);
@@ -1696,6 +2247,7 @@ export default function MapPage() {
             name: selectedExperience.name,
             latitude: selectedExperience.approximateLat,
             longitude: selectedExperience.approximateLng,
+            deviceId: deviceIdRef.current || undefined,
           }),
         });
         if (res.ok) {
@@ -1727,6 +2279,7 @@ export default function MapPage() {
             latitude: selectedExperience.approximateLat,
             longitude: selectedExperience.approximateLng,
             category: 'parkup',
+            deviceId: deviceIdRef.current || undefined,
           }),
         });
         if (res.ok) {
@@ -1790,6 +2343,11 @@ export default function MapPage() {
   }, []);
 
   // ── Sidebar click-to-zoom handlers ────────────────────────────────────────
+  const handleSidebarViaPointClick = useCallback((lat: number, lng: number) => {
+    if (!mapRef.current) return;
+    mapRef.current.setView([lat, lng], 15, { animate: true });
+  }, []);
+
   const handleSidebarPoiClick = useCallback((poi: DailyPoiResponse) => {
     if (!mapRef.current || poi.latitude == null || poi.longitude == null) return;
     mapRef.current.setView([poi.latitude, poi.longitude], 15, { animate: true });
@@ -1828,6 +2386,7 @@ export default function MapPage() {
           name: addPoiName.trim() || 'Point of Interest',
           latitude: addPoiPos.lat,
           longitude: addPoiPos.lng,
+          deviceId: deviceIdRef.current || undefined,
         }),
       });
       if (res.ok) {
@@ -1846,7 +2405,11 @@ export default function MapPage() {
   const handleDeletePoi = useCallback(async () => {
     if (!selectedPoi) return;
     try {
-      const res = await fetch(`/api/daily-pois/${selectedPoi.id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/daily-pois/${selectedPoi.id}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: deviceIdRef.current || undefined }),
+      });
       if (res.ok) {
         setTripPois((prev) => prev.filter((p) => p.id !== selectedPoi.id));
         setSelectedPoi(null);
@@ -1927,9 +2490,29 @@ export default function MapPage() {
       }
 
       const { provider: mapProvider, tileKey } = mapConfig;
+      mapProviderRef.current = mapProvider;
+      tileKeyRef.current = tileKey;
+
+      // Read persisted map type for this provider
+      let initialMapType: string | undefined;
+      try {
+        const storedTypes = JSON.parse(localStorage.getItem('tripPlanner:mapType') || '{}');
+        if (storedTypes[mapProvider]) initialMapType = storedTypes[mapProvider];
+      } catch { /* ignore */ }
 
       // Dynamically import leaflet to avoid SSR issues
       import('leaflet').then((L) => {
+        leafletRef.current = L;
+        const container = mapContainerRef.current;
+        if (!container) return;
+
+        // Defensive cleanup for dev/navigation remounts where Leaflet leaves
+        // an internal id on the DOM node, causing "Map container is already initialized".
+        const mutableContainer = container as HTMLDivElement & { _leaflet_id?: number };
+        if (mutableContainer._leaflet_id) {
+          mutableContainer._leaflet_id = undefined;
+        }
+
         // Restore saved map position, or fall back to home / Europe
         const saved = restoredRef.current;
         const center: [number, number] = saved
@@ -1941,7 +2524,7 @@ export default function MapPage() {
           ? saved.mapZoom
           : (homeLat !== null && homeLng !== null) ? 8 : 4;
 
-        const map = L.map(mapContainerRef.current!, {
+        const map = L.map(container, {
           center,
           zoom,
           zoomControl: true,
@@ -1977,21 +2560,25 @@ export default function MapPage() {
           const sw = b.getSouthWest();
           const ne = b.getNorthEast();
           setMapBounds({ south: sw.lat, west: sw.lng, north: ne.lat, east: ne.lng });
+          sendCastViewport(map);
         });
 
         // Add tile layer for the selected map provider, then mark map ready
-        addTileLayer(L, map, mapProvider, tileKey).then((mutantLayer: any) => {
+        addTileLayer(L, map, mapProvider, tileKey, initialMapType).then((layer: any) => {
+          tileLayerRef.current = layer;
           mapRef.current = map;
           setIsMapReady(true);
           isGoogleProviderRef.current = mapProvider === 'google';
+          const defaultType = mapProvider === 'google' ? 'roadmap' : mapProvider === 'mapbox' ? 'streets-v12' : '';
+          setMapType(initialMapType ?? defaultType);
 
           // When Google Maps is the provider, make the hidden Google Maps
           // instance receive real mouse clicks so we can detect POI icon
           // clicks via the native IconMouseEvent (which carries placeId).
-          if (mutantLayer && mapProvider === 'google') {
-            mutantLayer.whenReady(() => {
-              const gmap = mutantLayer._mutant;        // google.maps.Map
-              const container = mutantLayer._mutantContainer as HTMLElement;
+          if (layer && mapProvider === 'google') {
+            layer.whenReady(() => {
+              const gmap = layer._mutant;        // google.maps.Map
+              const container = layer._mutantContainer as HTMLElement;
               if (!gmap || !container) return;
 
               // Switch from visibility:hidden to opacity:0 so the Google
@@ -2017,6 +2604,23 @@ export default function MapPage() {
                 container.addEventListener(type, (ev: Event) => {
                   // Clone and re-dispatch on Leaflet's container
                   const clone = new (ev.constructor as any)(type, ev);
+                  // Synthetic MouseEvents built from a constructor lose the
+                  // legacy `which` property (it becomes 0). Leaflet's Draggable
+                  // checks `e.which !== 1 && e.button !== 1` to detect a
+                  // left-button press, so without restoring `which` it rejects
+                  // forwarded mousedowns and the map can't be panned. Copy the
+                  // original button-related fields back onto the clone.
+                  const original = ev as any;
+                  if (original.which !== undefined) {
+                    try {
+                      Object.defineProperty(clone, 'which', {
+                        value: original.which,
+                        configurable: true,
+                      });
+                    } catch {
+                      // Ignore: some event types disallow redefining `which`.
+                    }
+                  }
                   leafletContainer.dispatchEvent(clone);
                 }, { capture: true, passive: false });
               }
@@ -2057,6 +2661,7 @@ export default function MapPage() {
                     rating: p.rating,
                     ratingCount: p.userRatingCount,
                   };
+                  setSelectedExperienceRef.current(null);
                   setSelectedNearbyPlaceRef.current(nearbyPlace);
                 }).catch((err: any) => {
                   console.warn('[MapPage] Failed to fetch place details:', err);
@@ -2074,20 +2679,121 @@ export default function MapPage() {
         mapRef.current.remove();
         mapRef.current = null;
       }
+      if (mapContainerRef.current) {
+        const mutableContainer = mapContainerRef.current as HTMLDivElement & { _leaflet_id?: number };
+        if (mutableContainer._leaflet_id) {
+          mutableContainer._leaflet_id = undefined;
+        }
+      }
     };
-  }, []);
+  }, [sendCastViewport]);
+
+  const sidebarViewTitle =
+    sidebarView === 'create'
+      ? 'Create New Trip'
+      : sidebarView === 'edit'
+        ? 'Edit Trip'
+        : sidebarView === 'detail'
+          ? 'Trip Details'
+          : 'My Trips';
+
+  const sidebarContent = (
+    <div className="flex-1 overflow-y-auto">
+      {sidebarView === 'create' && (
+        <div className="p-6">
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold text-neutral-900 mb-2">
+              Create New Trip
+            </h2>
+            <p className="text-sm text-neutral-600">
+              Plan a trip by entering details below
+            </p>
+          </div>
+          <TripForm onSuccess={handleTripCreated} />
+        </div>
+      )}
+
+      {sidebarView === 'list' && (
+        <TripList
+          onTripSelect={handleTripSelect}
+          onTripEdit={handleEdit}
+          onTripDelete={handleDeleteClick}
+          refreshTrigger={refreshTrigger}
+        />
+      )}
+
+      {sidebarView === 'detail' && (
+        <TripDetail
+          tripId={selectedTripId}
+          onBack={handleBackToList}
+          onEdit={handleEdit}
+          onDelete={handleDeleteClick}
+          onRouteData={handleRouteData}
+          segmentRefreshTrigger={segmentRefreshTrigger}
+          destinationRefreshTrigger={destinationRefreshTrigger}
+          onFitPoints={handleFitPoints}
+          onDaySelect={handleDaySelect}
+          pois={tripPois}
+          initialSelectedDayId={restoredRef.current?.selectedDayDestId}
+          onStatusMessage={(text, detail) => statusBarRef.current?.pushStatus(text, detail)}
+          onToast={(text) => text ? statusBarRef.current?.showToast(text) : statusBarRef.current?.clearToast()}
+          onSetLoading={(text) => statusBarRef.current?.setLoading(text)}
+          onTripDatesChange={(start, stop) => { currentTripDatesRef.current = { start, stop }; }}
+          onExperiencesDiscovered={setExperienceResults}
+          onPoiClick={handleSidebarPoiClick}
+          onDestinationClick={handleSidebarDestinationClick}
+          onViaPointClick={handleSidebarViaPointClick}
+        />
+      )}
+
+      {sidebarView === 'edit' && editingTrip && (
+        <div className="p-6">
+          <div className="mb-6">
+            <h2 className="text-lg font-semibold text-neutral-900 mb-2">
+              Edit Trip
+            </h2>
+            <p className="text-sm text-neutral-600">
+              Update trip details and dates
+            </p>
+          </div>
+          <TripForm
+            mode="edit"
+            tripId={editingTrip.id}
+            initialData={{
+              title: editingTrip.title,
+              description: editingTrip.description ?? '',
+              startDate: toFormDate(editingTrip.startDate),
+              stopDate: toFormDate(editingTrip.stopDate),
+              routingPreferences: editingTrip.routingPreferences ?? undefined,
+            }}
+            onSuccess={handleTripUpdated}
+            onCancel={handleEditCancel}
+          />
+        </div>
+      )}
+    </div>
+  );
 
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex flex-col h-[100dvh] w-full overflow-hidden">
       {/* Header */}
-      <header className="bg-white border-b border-neutral-200 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="shrink-0">
-            <h1 className="text-2xl font-bold text-neutral-900">Trip Planner</h1>
+      <header className="bg-white border-b border-neutral-200 px-3 md:px-6 py-3 md:py-4">
+        <div className="flex items-center justify-between min-w-0 gap-1 sm:gap-2">
+          <div className="min-w-0">
+            <h1 className="text-xl sm:text-2xl font-bold text-neutral-900 truncate">Trip Planner</h1>
             <StatusBar ref={statusBarRef} />
+            {selectedTripId && (
+              <SyncStatus
+                isPolling={isPolling}
+                lastSyncTime={lastSyncTime}
+                error={syncError}
+                recentChanges={recentChanges}
+                currentDeviceName={deviceName}
+              />
+            )}
           </div>
           {/* Place search bar — centered in header */}
-          <div className="flex-1 flex justify-center px-6">
+          <div className="hidden sm:flex flex-1 justify-center px-6">
             <div className="relative w-80">
               <input
                 type="text"
@@ -2095,7 +2801,7 @@ export default function MapPage() {
                 onChange={(e) => handlePlaceSearchChange(e.target.value)}
                 onFocus={() => { if (placeSearchResults.length > 0) setPlaceSearchOpen(true); }}
                 onBlur={() => { setTimeout(() => setPlaceSearchOpen(false), 200); }}
-                placeholder="Search for a place..."
+                placeholder="Describe or search for a place..."
                 className="w-full bg-neutral-50 border border-neutral-300 rounded-lg px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
               />
               {placeSearching && (
@@ -2109,7 +2815,7 @@ export default function MapPage() {
               {!placeSearching && placeSearchQuery.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => { setPlaceSearchQuery(''); setPlaceSearchResults([]); setPlaceSearchOpen(false); }}
+                  onClick={() => { setPlaceSearchQuery(''); setPlaceSearchResults([]); setPlaceSearchOpen(false); setPlaceSearchNoResults(false); statusBarRef.current?.clearToast(); }}
                   className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 text-sm"
                   aria-label="Clear search"
                 >
@@ -2139,66 +2845,200 @@ export default function MapPage() {
                   })}
                 </ul>
               )}
-            </div>
-          </div>
-          <div className="shrink-0 flex items-center gap-4">
-            <div className="relative" ref={tripsMenuRef}>
-              <button
-                onClick={() => setTripsMenuOpen((v) => !v)}
-                className={`text-sm font-medium transition-colors ${
-                  sidebarView === 'create' || sidebarView === 'list' || sidebarView === 'detail' || sidebarView === 'edit'
-                    ? 'text-primary-700 font-semibold'
-                    : 'text-primary-600 hover:text-primary-800'
-                }`}
-              >
-                Trips
-              </button>
-              {tripsMenuOpen && (
-                <div className="absolute top-full right-0 mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg z-50 min-w-40 py-1">
-                  <button
-                    type="button"
-                    onClick={() => { setSidebarView('create'); setTripsMenuOpen(false); }}
-                    className={`w-full text-left px-4 py-2 text-sm hover:bg-primary-50 transition-colors ${
-                      sidebarView === 'create' ? 'text-primary-700 font-semibold' : 'text-neutral-700'
-                    }`}
-                  >
-                    Create Trip
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setSidebarView('list'); setTripsMenuOpen(false); }}
-                    className={`w-full text-left px-4 py-2 text-sm hover:bg-primary-50 transition-colors ${
-                      sidebarView === 'list' || sidebarView === 'detail' || sidebarView === 'edit'
-                        ? 'text-primary-700 font-semibold'
-                        : 'text-neutral-700'
-                    }`}
-                  >
-                    My Trips
-                  </button>
+              {placeSearchNoResults && !placeSearching && !placeSearchOpen && (
+                <div className="absolute left-0 right-0 mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg px-3 py-2 z-50">
+                  <p className="text-xs text-neutral-500">No places found (including AI-assisted search).</p>
                 </div>
               )}
             </div>
+          </div>
+          <div className="relative shrink-0" ref={tripsMenuRef}>
             <button
-              onClick={handleShowCached}
-              className="text-sm text-primary-600 hover:text-primary-800 font-medium"
-              title="Show all cached places in the current map view"
+              type="button"
+              onClick={() => setTripsMenuOpen((v) => !v)}
+              className="inline-flex items-center justify-center rounded-md border border-neutral-300 bg-white p-2 text-neutral-700 hover:bg-neutral-50"
+              aria-label="Open menu"
+              aria-expanded={tripsMenuOpen}
+              aria-haspopup="menu"
             >
-              Show Cached
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <line x1="3" y1="6" x2="21" y2="6" />
+                <line x1="3" y1="12" x2="21" y2="12" />
+                <line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
             </button>
-            <Link
-              href="/settings"
-              className="text-sm text-primary-600 hover:text-primary-800 font-medium"
-            >
-              Settings
-            </Link>
+            {tripsMenuOpen && (
+              <div className="absolute top-full right-0 mt-1 bg-white border border-neutral-200 rounded-lg shadow-lg z-50 min-w-52 py-1" role="menu">
+                <div className="sm:hidden px-3 pt-2 pb-2 border-b border-neutral-100">
+                  <label htmlFor="menu-place-search" className="block text-[11px] font-semibold uppercase tracking-wide text-neutral-500 mb-1">
+                    Search Place
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="menu-place-search"
+                      type="text"
+                      value={placeSearchQuery}
+                      onChange={(e) => handlePlaceSearchChange(e.target.value)}
+                      onFocus={() => { if (placeSearchResults.length > 0) setPlaceSearchOpen(true); }}
+                      onBlur={() => { setTimeout(() => setPlaceSearchOpen(false), 200); }}
+                      placeholder="Describe or search..."
+                      className="w-full bg-neutral-50 border border-neutral-300 rounded-md px-3 py-2 pr-8 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                    />
+                    {placeSearching && (
+                      <span className="absolute right-2.5 top-1/2 -translate-y-1/2">
+                        <svg className="animate-spin h-4 w-4 text-neutral-400" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                        </svg>
+                      </span>
+                    )}
+                    {!placeSearching && placeSearchQuery.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPlaceSearchQuery('');
+                          setPlaceSearchResults([]);
+                          setPlaceSearchOpen(false);
+                          setPlaceSearchNoResults(false);
+                          statusBarRef.current?.clearToast();
+                        }}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600 text-sm"
+                        aria-label="Clear search"
+                      >
+                        &times;
+                      </button>
+                    )}
+                  </div>
+                  {placeSearchOpen && placeSearchResults.length > 0 && (
+                    <ul className="mt-1 bg-white border border-neutral-200 rounded-md shadow-sm overflow-hidden divide-y divide-neutral-100 max-h-52 overflow-y-auto">
+                      {placeSearchResults.map((result) => {
+                        const secondary = result.displayName.indexOf(',') >= 0
+                          ? result.displayName.slice(result.displayName.indexOf(',') + 1).trim()
+                          : '';
+                        return (
+                          <li key={`menu-${result.placeId}`}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handlePlaceSelect(result);
+                                setTripsMenuOpen(false);
+                              }}
+                              className="w-full text-left px-3 py-2 hover:bg-primary-50 transition-colors"
+                            >
+                              <p className="text-sm font-medium text-neutral-900">{result.name}</p>
+                              {secondary && (
+                                <p className="text-xs text-neutral-500 truncate">{secondary}</p>
+                              )}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  {placeSearchNoResults && !placeSearching && !placeSearchOpen && (
+                    <p className="mt-1 text-xs text-neutral-500">No places found (including AI-assisted search).</p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSidebarView('create');
+                    if (isTouchMode) setTouchSidebarOpen(true);
+                    setTripsMenuOpen(false);
+                  }}
+                  className={`w-full text-left px-4 py-2 text-sm hover:bg-primary-50 transition-colors ${
+                    sidebarView === 'create' ? 'text-primary-700 font-semibold' : 'text-neutral-700'
+                  }`}
+                  role="menuitem"
+                >
+                  Create Trip
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSidebarView('list');
+                    if (isTouchMode) setTouchSidebarOpen(true);
+                    setTripsMenuOpen(false);
+                  }}
+                  className={`w-full text-left px-4 py-2 text-sm hover:bg-primary-50 transition-colors ${
+                    sidebarView === 'list' || sidebarView === 'detail' || sidebarView === 'edit'
+                      ? 'text-primary-700 font-semibold'
+                      : 'text-neutral-700'
+                  }`}
+                  role="menuitem"
+                >
+                  My Trips
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportModalOpen(true);
+                    setTripsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm text-neutral-700 hover:bg-primary-50 transition-colors"
+                  title="Import a trip from a JSON export file"
+                  role="menuitem"
+                >
+                  Import Trip
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleShowCached();
+                    setTripsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm text-neutral-700 hover:bg-primary-50 transition-colors"
+                  title="Show all cached places in the current map view"
+                  role="menuitem"
+                >
+                  Show Cached
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (castState === 'connected') {
+                      syncCastNow();
+                    } else {
+                      startCasting();
+                    }
+                    setTripsMenuOpen(false);
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm text-neutral-700 hover:bg-primary-50 transition-colors"
+                  role="menuitem"
+                >
+                  {castStateLabel}
+                </button>
+                {castState === 'connected' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      stopCasting();
+                      setTripsMenuOpen(false);
+                    }}
+                    className="w-full text-left px-4 py-2 text-sm text-neutral-700 hover:bg-primary-50 transition-colors"
+                    role="menuitem"
+                  >
+                    Stop Casting
+                  </button>
+                )}
+                <Link
+                  href="/settings"
+                  onClick={() => setTripsMenuOpen(false)}
+                  className="block w-full px-4 py-2 text-sm text-neutral-700 hover:bg-primary-50 transition-colors"
+                  role="menuitem"
+                >
+                  Settings
+                </Link>
+              </div>
+            )}
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden min-w-0 min-h-0">
         {/* Map Container */}
-        <div className="flex-1 relative">
+        <div className="flex-1 relative min-w-0 min-h-0">
           <div
             ref={mapContainerRef}
             className="absolute inset-0 w-full h-full"
@@ -2229,6 +3069,7 @@ export default function MapPage() {
               onAddPoi={handleOpenAddPoiModal}
               selectedDayLabel={getDayLabel(selectedDayDestIdRef.current, currentDestinationsRef.current)}
               onClose={() => setContextMenu(null)}
+              touchMode={isTouchMode}
             />
           )}
 
@@ -2240,6 +3081,16 @@ export default function MapPage() {
               onToggleItem={handleToggleFilterItem}
               onToggleGroup={handleToggleFilterGroup}
               onClose={() => setMarkerFilterOpen(false)}
+              touchMode={isTouchMode}
+            />
+          )}
+
+          {/* Map type switcher */}
+          {isMapReady && mapProviderRef.current !== 'osm' && (
+            <MapTypeSwitcher
+              provider={mapProviderRef.current}
+              activeType={mapType}
+              onSwitch={handleSwitchMapType}
             />
           )}
 
@@ -2343,6 +3194,7 @@ export default function MapPage() {
                 name={selectedPoi.name}
                 subtitle={dayLabel || undefined}
                 onClose={() => setSelectedPoi(null)}
+                touchMode={isTouchMode}
                 badge={
                   <span className="inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border text-violet-700 bg-violet-50 border-violet-200">
                     My POI
@@ -2393,6 +3245,7 @@ export default function MapPage() {
                   : `~${Math.round(selectedWaypoint.targetDurationSeconds / 60)} min from start`
               }
               onClose={() => setSelectedWaypoint(null)}
+              touchMode={isTouchMode}
               badge={
                 <span className={`inline-block text-[10px] font-semibold rounded px-1.5 py-0.5 mb-1 border ${selectedWaypoint.isManual ? 'text-orange-700 bg-orange-50 border-orange-200' : 'text-blue-700 bg-blue-50 border-blue-200'}`}>
                   {selectedWaypoint.isManual ? 'Manual' : 'Auto'}
@@ -2442,6 +3295,7 @@ export default function MapPage() {
             <PlacePopup
               name={selectedNearbyPlace.name}
               subtitle={selectedNearbyPlace.type.replace(/_/g, ' ')}
+              touchMode={isTouchMode}
               onClose={() => {
                 setSelectedNearbyPlace(null);
                 setNearbySegmentPickerOpen(false);
@@ -2631,6 +3485,7 @@ export default function MapPage() {
             <PlacePopup
               name={selectedExperience.name}
               subtitle={`${selectedExperience.category.replace(/_/g, ' ')} · ${selectedExperience.nearestCity}, ${selectedExperience.country}`}
+              touchMode={isTouchMode}
               onClose={() => {
                 setSelectedExperience(null);
                 setExperiencePoiPickerOpen(false);
@@ -2764,82 +3619,52 @@ export default function MapPage() {
           )}
         </div>
 
-        {/* Sidebar for trip management */}
-        <aside className="w-96 bg-white border-l border-neutral-200 overflow-y-auto flex flex-col">
-          {/* Sidebar Content */}
-          <div className="flex-1 overflow-y-auto">
-            {sidebarView === 'create' && (
-              <div className="p-6">
-                <div className="mb-6">
-                  <h2 className="text-lg font-semibold text-neutral-900 mb-2">
-                    Create New Trip
-                  </h2>
-                  <p className="text-sm text-neutral-600">
-                    Plan a trip by entering details below
-                  </p>
+        {!isTouchMode && (
+          <>
+            {/* Sidebar resize handle */}
+            <div
+              onMouseDown={handleSidebarDragStart}
+              className="w-1.5 cursor-col-resize bg-neutral-200 hover:bg-primary-400 active:bg-primary-500 transition-colors shrink-0"
+            />
+            {/* Sidebar for trip management */}
+            <aside style={{ width: sidebarWidth }} className="bg-white overflow-y-auto flex flex-col shrink-0">
+              {sidebarContent}
+            </aside>
+          </>
+        )}
+
+        {isTouchMode && (
+          <>
+            {!touchSidebarOpen && (
+              <button
+                type="button"
+                onClick={() => setTouchSidebarOpen(true)}
+                className="absolute bottom-4 right-4 z-[880] rounded-full bg-primary-600 text-white shadow-lg px-4 py-2.5 text-sm font-semibold"
+              >
+                Trips
+              </button>
+            )}
+
+            {touchSidebarOpen && (
+              <div className="absolute inset-x-0 bottom-0 z-[880] pointer-events-none">
+                <div className="mx-2 mb-2 rounded-t-2xl rounded-b-lg border border-neutral-200 bg-white shadow-2xl pointer-events-auto max-h-[68vh] flex flex-col pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-200">
+                    <p className="text-sm font-semibold text-neutral-800">{sidebarViewTitle}</p>
+                    <button
+                      type="button"
+                      onClick={() => setTouchSidebarOpen(false)}
+                      className="text-neutral-400 hover:text-neutral-600 text-xl leading-none"
+                      aria-label="Close panel"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  {sidebarContent}
                 </div>
-                <TripForm onSuccess={handleTripCreated} />
               </div>
             )}
-
-            {sidebarView === 'list' && (
-              <TripList
-                onTripSelect={handleTripSelect}
-                onTripEdit={handleEdit}
-                onTripDelete={handleDeleteClick}
-                refreshTrigger={refreshTrigger}
-              />
-            )}
-
-            {sidebarView === 'detail' && (
-              <TripDetail
-                tripId={selectedTripId}
-                onBack={handleBackToList}
-                onEdit={handleEdit}
-                onDelete={handleDeleteClick}
-                onRouteData={handleRouteData}
-                segmentRefreshTrigger={segmentRefreshTrigger}
-                destinationRefreshTrigger={destinationRefreshTrigger}
-                onFitPoints={handleFitPoints}
-                onDaySelect={handleDaySelect}
-                pois={tripPois}
-                initialSelectedDayId={restoredRef.current?.selectedDayDestId}
-                onStatusMessage={(text, detail) => statusBarRef.current?.pushStatus(text, detail)}
-                onSetLoading={(text) => statusBarRef.current?.setLoading(text)}
-                onTripDatesChange={(start, stop) => { currentTripDatesRef.current = { start, stop }; }}
-                onExperiencesDiscovered={setExperienceResults}
-                onPoiClick={handleSidebarPoiClick}
-                onDestinationClick={handleSidebarDestinationClick}
-              />
-            )}
-
-            {sidebarView === 'edit' && editingTrip && (
-              <div className="p-6">
-                <div className="mb-6">
-                  <h2 className="text-lg font-semibold text-neutral-900 mb-2">
-                    Edit Trip
-                  </h2>
-                  <p className="text-sm text-neutral-600">
-                    Update trip details and dates
-                  </p>
-                </div>
-                <TripForm
-                  mode="edit"
-                  tripId={editingTrip.id}
-                  initialData={{
-                    title: editingTrip.title,
-                    description: editingTrip.description ?? '',
-                    startDate: toFormDate(editingTrip.startDate),
-                    stopDate: toFormDate(editingTrip.stopDate),
-                    routingPreferences: editingTrip.routingPreferences ?? undefined,
-                  }}
-                  onSuccess={handleTripUpdated}
-                  onCancel={handleEditCancel}
-                />
-              </div>
-            )}
-          </div>
-        </aside>
+          </>
+        )}
       </div>
 
       {/* Nearby Search Modal */}
@@ -2867,6 +3692,15 @@ export default function MapPage() {
       )}
 
       {/* Delete Confirmation Modal */}
+      <ImportTripModal
+        isOpen={importModalOpen}
+        onClose={() => setImportModalOpen(false)}
+        onImported={(report) => {
+          setRefreshTrigger((prev) => prev + 1);
+          setSelectedTripId(report.tripId);
+        }}
+      />
+
       {tripToDelete && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">

@@ -194,6 +194,7 @@ export function buildAreaUserPrompt(
   bounds: BoundsArea,
   knownPlaces?: Array<{ name: string; country: string }>,
   searchContext?: string,
+  geoInfo?: { city: string; region: string; country: string } | null,
 ): string {
   const centerLat = (bounds.south + bounds.north) / 2;
   const centerLng = (bounds.west + bounds.east) / 2;
@@ -202,15 +203,21 @@ export function buildAreaUserPrompt(
   const latSpanKm = Math.abs(bounds.north - bounds.south) * 111;
   const lngSpanKm = Math.abs(bounds.east - bounds.west) * 111 * Math.cos((centerLat * Math.PI) / 180);
 
+  // Build a human-readable area description
+  const areaName = geoInfo
+    ? `${geoInfo.city}${geoInfo.region ? ', ' + geoInfo.region : ''}, ${geoInfo.country}`
+    : null;
+
   const lines: string[] = [
-    `Using the research results below, identify the most exceptional experiences in this geographic area.`,
+    `Using the research results below and your own knowledge, identify the most exceptional experiences in this geographic area.`,
     '',
     '**Area:**',
+    ...(areaName ? [`  Location: ${areaName}`] : []),
     `  Center: (${centerLat.toFixed(4)}, ${centerLng.toFixed(4)})`,
     `  Bounding box: SW (${bounds.south.toFixed(4)}, ${bounds.west.toFixed(4)}) — NE (${bounds.north.toFixed(4)}, ${bounds.east.toFixed(4)})`,
     `  Approximate size: ${Math.round(latSpanKm)} km (N-S) × ${Math.round(lngSpanKm)} km (E-W)`,
     '',
-    'Identify UNESCO World Heritage Sites, Michelin-starred and Gault & Millau-rated restaurants, renowned national parks, iconic landmarks, Council of Europe Cultural Routes, and notable cultural venues within these bounds. Use the research results and your own knowledge. Provide precise GPS coordinates for each recommendation.',
+    `Identify UNESCO World Heritage Sites, Michelin-starred and Gault & Millau-rated restaurants, renowned national parks, iconic landmarks, Council of Europe Cultural Routes, and notable cultural venues within these bounds.${areaName ? ` Focus on the ${areaName} area and surrounding region.` : ''} Use the research results AND your own knowledge — if the research results are sparse or irrelevant, rely on your knowledge of the area. Provide precise GPS coordinates for each recommendation.`,
   ];
 
   if (knownPlaces && knownPlaces.length > 0) {

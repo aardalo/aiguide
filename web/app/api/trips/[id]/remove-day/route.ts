@@ -63,33 +63,20 @@ export async function POST(
   }
 
   await prisma.$transaction(async (tx) => {
-    // Delete destination, POIs, and route segments/waypoints for this date
-    const destForDate = await tx.dailyDestination.findFirst({
+    // Delete destinations, POIs, and route segments/waypoints for this date.
+    // A journey day is global, so this removes that date across main + branches.
+    const segsForDate = await tx.routeSegment.findMany({
       where: { tripId: id, dayDate: dateObj },
+      select: { id: true },
     });
 
-    if (destForDate) {
-      // Delete waypoints for any route segment on this date
-      const segForDate = await tx.routeSegment.findFirst({
-        where: { tripId: id, dayDate: dateObj },
-      });
-      if (segForDate) {
-        await tx.routeWaypoint.deleteMany({ where: { segmentId: segForDate.id } });
-      }
-      await tx.routeSegment.deleteMany({ where: { tripId: id, dayDate: dateObj } });
-      await tx.dailyPoi.deleteMany({ where: { tripId: id, dayDate: dateObj } });
-      await tx.dailyDestination.delete({ where: { id: destForDate.id } });
-    } else {
-      // Even without a destination there may be POIs or segments
-      const segForDate = await tx.routeSegment.findFirst({
-        where: { tripId: id, dayDate: dateObj },
-      });
-      if (segForDate) {
-        await tx.routeWaypoint.deleteMany({ where: { segmentId: segForDate.id } });
-      }
-      await tx.routeSegment.deleteMany({ where: { tripId: id, dayDate: dateObj } });
-      await tx.dailyPoi.deleteMany({ where: { tripId: id, dayDate: dateObj } });
+    for (const seg of segsForDate) {
+      await tx.routeWaypoint.deleteMany({ where: { segmentId: seg.id } });
     }
+
+    await tx.routeSegment.deleteMany({ where: { tripId: id, dayDate: dateObj } });
+    await tx.dailyPoi.deleteMany({ where: { tripId: id, dayDate: dateObj } });
+    await tx.dailyDestination.deleteMany({ where: { tripId: id, dayDate: dateObj } });
 
     // Shift all records after this date back by 1 day (process forwards to avoid unique constraint clash)
     const destsToShift = await tx.dailyDestination.findMany({
@@ -125,12 +112,26 @@ export async function POST(
       orderBy: { dayDate: 'asc' },
     });
 
+    const branchesToShift = await tx.branch.findMany({
+      where: { tripId: id, anchorDayDate: { gt: dateObj } },
+      orderBy: { anchorDayDate: 'asc' },
+    });
+
     for (const seg of segsToShift) {
       const newDate = new Date(seg.dayDate);
       newDate.setUTCDate(newDate.getUTCDate() - 1);
       await tx.routeSegment.update({
         where: { id: seg.id },
         data: { dayDate: newDate },
+      });
+    }
+
+    for (const branch of branchesToShift) {
+      const newDate = new Date(branch.anchorDayDate);
+      newDate.setUTCDate(newDate.getUTCDate() - 1);
+      await tx.branch.update({
+        where: { id: branch.id },
+        data: { anchorDayDate: newDate },
       });
     }
 

@@ -1,5 +1,6 @@
 import type { DiscoveredExperience } from './types';
 import { chatGptResponseSchema } from '@/lib/schemas/discovery';
+import { repairJson } from './json-repair';
 
 const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
@@ -105,7 +106,13 @@ export async function callClaude(
         throw new Error('Claude response missing text content');
       }
 
-      const parsed = JSON.parse(content);
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(content) as Record<string, unknown>;
+      } catch {
+        console.warn('[discovery/claude] JSON truncated, attempting repair...');
+        parsed = repairJson(content) as Record<string, unknown>;
+      }
       const validated = chatGptResponseSchema.safeParse(parsed);
 
       if (!validated.success) {

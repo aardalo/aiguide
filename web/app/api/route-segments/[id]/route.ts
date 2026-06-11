@@ -17,6 +17,7 @@ import { getSetting, SETTING_KEYS } from '@/lib/settings';
 const patchBodySchema = z.object({
   latitude: z.number(),
   longitude: z.number(),
+  deviceId: z.string().cuid().optional(),
 });
 
 export async function PATCH(
@@ -35,7 +36,7 @@ export async function PATCH(
       );
     }
 
-    const { latitude: viaLat, longitude: viaLng } = validation.data;
+    const { latitude: viaLat, longitude: viaLng, deviceId } = validation.data;
 
     // Find the segment with existing waypoints
     const segment = await prisma.routeSegment.findUnique({
@@ -128,6 +129,7 @@ export async function PATCH(
         durationSeconds: result.totalDurationSeconds,
         encodedPolyline,
         provider: provider.id,
+        lastModifiedByDeviceId: deviceId || null,
       },
     });
 
@@ -153,6 +155,7 @@ export async function PATCH(
         targetDurationSeconds: 0,
         actualDurationSeconds: 0,
         isManual: true,
+        lastModifiedByDeviceId: deviceId || null,
       },
     });
 

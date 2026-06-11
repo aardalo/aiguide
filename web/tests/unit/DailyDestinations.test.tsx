@@ -17,6 +17,46 @@ global.fetch = mockFetch;
 // Mock confirm
 global.confirm = vi.fn(() => true);
 
+/**
+ * Helper: create a successful fetch response.
+ */
+function ok(data: unknown) {
+  return { ok: true, json: async () => data };
+}
+
+/**
+ * Helper: create a failed fetch response.
+ */
+function fail(status: number, data: unknown) {
+  return { ok: false, status, json: async () => data };
+}
+
+/**
+ * The component's init() fires 4 parallel fetches then, when no segments
+ * exist, calls generateRoutes() which fires a POST to /api/route-segments.
+ *
+ * Parallel:
+ *   1. GET /api/daily-destinations?tripId=...
+ *   2. GET /api/route-segments?tripId=...
+ *   3. GET /api/settings
+ *   4. GET /api/branches?tripId=...
+ *
+ * Then if segments are empty:
+ *   5. POST /api/route-segments  (main branch)
+ */
+function mockInitFetches(
+  destinations: DailyDestinationResponse[] = [],
+  segments: unknown[] = [],
+) {
+  mockFetch
+    .mockResolvedValueOnce(ok(destinations))   // 1. daily-destinations
+    .mockResolvedValueOnce(ok(segments))        // 2. route-segments GET
+    .mockResolvedValueOnce(ok([]))              // 3. settings
+    .mockResolvedValueOnce(ok([]))              // 4. branches
+    // 5. POST route-segments (auto-generate when segments empty)
+    .mockResolvedValueOnce(fail(422, { code: 'insufficient_destinations' }));
+}
+
 describe('DailyDestinations Component', () => {
   const mockTrip: TripResponse = {
     id: 'test-trip-id',
@@ -39,6 +79,7 @@ describe('DailyDestinations Component', () => {
       latitude: 48.8566,
       longitude: 2.3522,
       notes: 'City of lights',
+      isLayover: false,
       createdAt: '2026-03-01T00:00:00.000Z',
       updatedAt: '2026-03-01T00:00:00.000Z',
     },
@@ -50,10 +91,7 @@ describe('DailyDestinations Component', () => {
   });
 
   it('should render daily itinerary title', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [],
-    });
+    mockInitFetches();
 
     render(<DailyDestinations trip={mockTrip} />);
 
@@ -61,10 +99,7 @@ describe('DailyDestinations Component', () => {
   });
 
   it('should fetch destinations on mount', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockDestinations,
-    });
+    mockInitFetches();
 
     render(<DailyDestinations trip={mockTrip} />);
 
@@ -76,10 +111,7 @@ describe('DailyDestinations Component', () => {
   });
 
   it('should display all trip dates', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [],
-    });
+    mockInitFetches();
 
     render(<DailyDestinations trip={mockTrip} />);
 
@@ -92,11 +124,7 @@ describe('DailyDestinations Component', () => {
   });
 
   it('should display existing destinations', async () => {
-    mockFetch
-      .mockResolvedValueOnce({ ok: true, json: async () => mockDestinations })
-      .mockResolvedValueOnce({ ok: true, json: async () => [] }) // route-segments GET
-      .mockResolvedValueOnce({ ok: true, json: async () => [] }) // settings
-      .mockResolvedValueOnce({ ok: false, json: async () => ({ code: 'insufficient_destinations' }) }); // route-segments POST (auto-generate)
+    mockInitFetches(mockDestinations);
 
     render(<DailyDestinations trip={mockTrip} />);
 
@@ -107,11 +135,7 @@ describe('DailyDestinations Component', () => {
   });
 
   it('should show "No destination set" for days without destinations', async () => {
-    mockFetch
-      .mockResolvedValueOnce({ ok: true, json: async () => mockDestinations })
-      .mockResolvedValueOnce({ ok: true, json: async () => [] }) // route-segments GET
-      .mockResolvedValueOnce({ ok: true, json: async () => [] }) // settings
-      .mockResolvedValueOnce({ ok: false, json: async () => ({ code: 'insufficient_destinations' }) }); // route-segments POST (auto-generate)
+    mockInitFetches(mockDestinations);
 
     render(<DailyDestinations trip={mockTrip} />);
 
@@ -122,10 +146,7 @@ describe('DailyDestinations Component', () => {
   });
 
   it('should show add destination button', async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => [],
-    });
+    mockInitFetches();
 
     render(<DailyDestinations trip={mockTrip} />);
 
@@ -134,64 +155,57 @@ describe('DailyDestinations Component', () => {
     });
   });
 
-  it('should show add form when add button is clicked', async () => {
-    mockFetch
-      .mockResolvedValueOnce({ ok: true, json: async () => [] })
-      .mockResolvedValueOnce({ ok: true, json: async () => [] }); // route-segments
+  it('should show add form when per-day add button is clicked', async () => {
+    mockInitFetches();
 
     const user = userEvent.setup();
     render(<DailyDestinations trip={mockTrip} />);
 
+    // Wait for days to render — each empty day has a per-day "Add destination" icon
     await waitFor(() => {
-      expect(screen.getByText('+ Add Destination')).toBeInTheDocument();
+      expect(screen.getAllByTitle('Add destination').length).toBeGreaterThan(0);
     });
 
-    await user.click(screen.getByText('+ Add Destination'));
+    // Click the first per-day add button (this sets addForDate to the day's date)
+    await user.click(screen.getAllByTitle('Add destination')[0]);
 
     await waitFor(() => {
       expect(screen.getByText('Add Destination', { selector: 'h4' })).toBeInTheDocument();
-      expect(screen.getByLabelText(/^Destination/i)).toBeInTheDocument();
+      expect(screen.getByLabelText(/Describe or search/i)).toBeInTheDocument();
     });
   });
 
   it('should show edit and delete buttons for existing destinations', async () => {
-    mockFetch
-      .mockResolvedValueOnce({ ok: true, json: async () => mockDestinations })
-      .mockResolvedValueOnce({ ok: true, json: async () => [] }) // route-segments GET
-      .mockResolvedValueOnce({ ok: true, json: async () => [] }) // settings
-      .mockResolvedValueOnce({ ok: false, json: async () => ({ code: 'insufficient_destinations' }) }); // route-segments POST (auto-generate)
+    mockInitFetches(mockDestinations);
 
     render(<DailyDestinations trip={mockTrip} />);
 
     await waitFor(() => {
-      expect(screen.getByText('Edit')).toBeInTheDocument();
-      expect(screen.getByText('Delete')).toBeInTheDocument();
+      expect(screen.getByTitle('Edit destination')).toBeInTheDocument();
+      expect(screen.getByTitle('Delete destination')).toBeInTheDocument();
     });
   });
 
   it('should call delete API when delete button is clicked', async () => {
-    mockFetch
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => mockDestinations,
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({}),
-      })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => [],
-      });
+    mockInitFetches(mockDestinations);
 
     const user = userEvent.setup();
     render(<DailyDestinations trip={mockTrip} />);
 
     await waitFor(() => {
-      expect(screen.getByText('Delete')).toBeInTheDocument();
+      expect(screen.getByTitle('Delete destination')).toBeInTheDocument();
     });
 
-    await user.click(screen.getByText('Delete'));
+    // After clicking delete, handleDelete fires:
+    //   DELETE /api/daily-destinations/:id
+    //   GET /api/daily-destinations (fetchDestinations)
+    //   POST /api/route-segments (generateRoutes — main)
+    mockFetch
+      .mockResolvedValueOnce(ok({}))                                         // DELETE
+      .mockResolvedValueOnce(ok([]))                                         // GET destinations
+      .mockResolvedValueOnce(fail(422, { code: 'insufficient_destinations' })); // POST route-segments
+
+    await user.click(screen.getByTitle('Delete destination'));
 
     await waitFor(() => {
       expect(mockFetch).toHaveBeenCalledWith(
@@ -215,41 +229,36 @@ describe('DailyDestinations Component', () => {
 
   describe('Destination Form', () => {
     it('should render form with all required fields', async () => {
-      mockFetch
-        .mockResolvedValueOnce({ ok: true, json: async () => [] })
-        .mockResolvedValueOnce({ ok: true, json: async () => [] }); // route-segments
+      mockInitFetches();
 
       const user = userEvent.setup();
       render(<DailyDestinations trip={mockTrip} />);
 
       await waitFor(() => {
-        expect(screen.getByText('+ Add Destination')).toBeInTheDocument();
+        expect(screen.getAllByTitle('Add destination').length).toBeGreaterThan(0);
       });
 
-      await user.click(screen.getByText('+ Add Destination'));
+      await user.click(screen.getAllByTitle('Add destination')[0]);
 
       // Verify all form fields are present
       await waitFor(() => {
         expect(screen.getByLabelText(/Date/i)).toBeInTheDocument();
-        expect(screen.getByLabelText(/^Destination/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Describe or search/i)).toBeInTheDocument();
         expect(screen.getByLabelText(/Notes/i)).toBeInTheDocument();
       });
     });
 
     it('should cancel form when cancel button is clicked', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => [],
-      });
+      mockInitFetches();
 
       const user = userEvent.setup();
       render(<DailyDestinations trip={mockTrip} />);
 
       await waitFor(() => {
-        expect(screen.getByText('+ Add Destination')).toBeInTheDocument();
+        expect(screen.getAllByTitle('Add destination').length).toBeGreaterThan(0);
       });
 
-      await user.click(screen.getByText('+ Add Destination'));
+      await user.click(screen.getAllByTitle('Add destination')[0]);
 
       await waitFor(() => {
         expect(screen.getByText('Add Destination', { selector: 'h4' })).toBeInTheDocument();
@@ -263,28 +272,26 @@ describe('DailyDestinations Component', () => {
     });
 
     it('should validate required fields', async () => {
-      mockFetch
-        .mockResolvedValueOnce({ ok: true, json: async () => [] })
-        .mockResolvedValueOnce({ ok: true, json: async () => [] }); // route-segments
+      mockInitFetches();
 
       const user = userEvent.setup();
       render(<DailyDestinations trip={mockTrip} />);
 
       await waitFor(() => {
-        expect(screen.getByText('+ Add Destination')).toBeInTheDocument();
+        expect(screen.getAllByTitle('Add destination').length).toBeGreaterThan(0);
       });
 
-      await user.click(screen.getByText('+ Add Destination'));
+      await user.click(screen.getAllByTitle('Add destination')[0]);
 
       await waitFor(() => {
-        expect(screen.getByLabelText(/^Destination/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Describe or search/i)).toBeInTheDocument();
       });
 
-      const nameInput = screen.getByLabelText(/^Destination/i);
-      
+      const nameInput = screen.getByLabelText(/Describe or search/i);
+
       // Verify input has required attribute
       expect(nameInput).toHaveAttribute('required');
-      
+
       // Form should not allow submission with empty required field
       expect(nameInput).toHaveValue('');
     });

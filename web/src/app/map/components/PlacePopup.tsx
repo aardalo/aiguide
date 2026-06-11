@@ -8,6 +8,7 @@ interface PlacePopupProps {
   children?: ReactNode;
   links?: ReactNode;
   actions?: ReactNode;
+  touchMode?: boolean;
 }
 
 export default function PlacePopup({
@@ -18,9 +19,14 @@ export default function PlacePopup({
   children,
   links,
   actions,
+  touchMode = false,
 }: PlacePopupProps) {
+  const containerClass = touchMode
+    ? 'fixed left-3 right-3 bottom-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-white rounded-xl shadow-xl border border-neutral-200 p-4 z-[950] max-h-[62vh] overflow-y-auto'
+    : 'absolute bottom-4 left-4 bg-white rounded-lg shadow-xl border border-neutral-200 p-4 z-[800] w-80 max-w-[calc(100%-2rem)]';
+
   return (
-    <div className="absolute bottom-4 left-4 bg-white rounded-lg shadow-xl border border-neutral-200 p-4 z-[800] w-80 max-w-[calc(100%-2rem)]">
+    <div className={containerClass}>
       <div className="flex items-start justify-between gap-2 mb-2">
         <div>
           {badge}

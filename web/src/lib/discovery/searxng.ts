@@ -422,6 +422,37 @@ export async function searchForChunk(
 }
 
 // ---------------------------------------------------------------------------
+// Reverse geocode bounds center via Nominatim to get meaningful place names.
+// Exported so the orchestrator can pass the result to the AI prompt as well.
+// ---------------------------------------------------------------------------
+
+export interface BoundsGeoInfo {
+  city: string;
+  region: string;
+  country: string;
+}
+
+export async function reverseGeocodeCenter(lat: number, lng: number): Promise<BoundsGeoInfo | null> {
+  try {
+    // Request English names so country matches COUNTRY_SEARCH_TERMS keys
+    const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=10&addressdetails=1&accept-language=en`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'TripPlanner/1.0', Accept: 'application/json' },
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const addr = data.address ?? {};
+    const city = addr.city || addr.town || addr.village || addr.municipality || '';
+    const region = addr.state || addr.county || '';
+    const country = addr.country || '';
+    return city || country ? { city, region, country } : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API — bounds-based search
 // ---------------------------------------------------------------------------
 
@@ -429,12 +460,16 @@ export async function searchForBounds(
   baseUrl: string,
   bounds: BoundsArea,
   knownNames: string[],
+  geo?: BoundsGeoInfo | null,
 ): Promise<string> {
   const centerLat = (bounds.south + bounds.north) / 2;
   const centerLng = (bounds.west + bounds.east) / 2;
   const exclusion = buildExclusionSuffix(knownNames);
 
-  const locationHint = `near ${centerLat.toFixed(2)},${centerLng.toFixed(2)}`;
+  // Use pre-resolved geo info, or fall back to coordinates
+  const locationHint = geo
+    ? `${geo.city}${geo.region ? ' ' + geo.region : ''} ${geo.country}`
+    : `near ${centerLat.toFixed(2)},${centerLng.toFixed(2)}`;
 
   const queries: Array<{ category: SearchCategory; query: string; lang: string }> = [
     { category: 'highlights', query: `"best things to do" OR "top attractions" ${locationHint}${exclusion}`, lang: 'en' },
@@ -443,6 +478,23 @@ export async function searchForBounds(
     { category: 'nature', query: `"national parks" OR "scenic viewpoints" OR "best hikes" ${locationHint}${exclusion}`, lang: 'en' },
     { category: 'culinary', query: `"Michelin" OR "best restaurants" OR "food experiences" ${locationHint}${exclusion}`, lang: 'en' },
   ];
+
+  // Add local-language queries if the country is recognised
+  if (geo?.country) {
+    const terms = COUNTRY_SEARCH_TERMS[geo.country];
+    if (terms) {
+      const cityHint = geo.city || geo.region || geo.country;
+      const regionHint = geo.region || geo.country;
+      for (const cat of CATEGORIES) {
+        const hint = cat === 'culinary' || cat === 'highlights' ? cityHint : regionHint;
+        queries.push({
+          category: cat,
+          query: `${terms[cat]} ${hint}${exclusion}`,
+          lang: terms.lang,
+        });
+      }
+    }
+  }
 
   const results = await Promise.all(
     queries.map(async (q) => ({
@@ -458,7 +510,7 @@ export async function searchForBounds(
 
   const formatted = formatResults(byCategory);
   const totalResults = [...byCategory.values()].reduce((sum, arr) => sum + arr.length, 0);
-  console.log(`[searxng] Bounds search: ${queries.length} queries, ${totalResults} unique results`);
+  console.log(`[searxng] Bounds search (${locationHint}): ${queries.length} queries, ${totalResults} unique results`);
 
   return totalResults > 0 ? formatted : '';
 }

@@ -78,6 +78,8 @@ export async function POST(request: NextRequest) {
     }
 
     const data = validation.data;
+    const branchId = data.branchId ?? null;
+    const deviceId = data.deviceId ?? null;
 
     // tripId must be provided in the request body (not in Zod schema — validated separately)
     const tripId = (body as Record<string, unknown>).tripId as string | undefined;
@@ -111,6 +113,31 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (branchId) {
+      const branch = await prisma.branch.findUnique({ where: { id: branchId } });
+      if (!branch || branch.tripId !== tripId) {
+        return NextResponse.json(
+          { error: "Branch not found for this trip" },
+          { status: 404 }
+        );
+      }
+
+      if (dayDate < branch.anchorDayDate) {
+        return NextResponse.json(
+          { error: "Branch destinations cannot be scheduled before the fork anchor day" },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Layover cannot be the first day of the trip
+    if (data.isLayover && dayDate.getTime() === trip.startDate.getTime()) {
+      return NextResponse.json(
+        { error: "The first day of a trip cannot be a layover" },
+        { status: 400 }
+      );
+    }
+
     // Create daily destination
     const destination = await prisma.dailyDestination.create({
       data: {
@@ -121,7 +148,9 @@ export async function POST(request: NextRequest) {
         latitude: data.latitude ?? null,
         longitude: data.longitude ?? null,
         notes: data.notes ?? null,
-        branchId: data.branchId ?? null,
+        isLayover: data.isLayover ?? false,
+        lastModifiedByDeviceId: deviceId,
+        branchId,
       },
     });
 

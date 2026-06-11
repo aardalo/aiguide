@@ -167,9 +167,11 @@ describe("Daily Destination Schemas", () => {
         tripId: "cm9g1up4c0001zf8o0x0x2fz2",
         dayDate: "2026-06-02", // String from API
         name: "Paris",
+        municipality: null,
         latitude: 48.8566,
         longitude: 2.3522,
         notes: "City of lights",
+        isLayover: false,
         createdAt: "2026-03-02T12:00:00Z",
         updatedAt: "2026-03-02T12:00:00Z",
       };
@@ -189,9 +191,11 @@ describe("Daily Destination Schemas", () => {
         tripId: "cm9g1up4c0003zf8o0x0x2fz4",
         dayDate: "2026-06-02", // String from API
         name: "Paris",
+        municipality: null,
         latitude: null,
         longitude: null,
         notes: "City of lights",
+        isLayover: false,
         createdAt: "2026-03-02T12:00:00Z",
         updatedAt: "2026-03-02T12:00:00Z",
       };

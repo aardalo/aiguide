@@ -6,7 +6,8 @@ import { callOpenAi } from './openai';
 import { callClaude } from './claude';
 import { callClaudeBatch } from './claude-batch';
 import { getCachedDiscoveries, getCachedExperiencesNearRoute, cacheDiscoveredExperiences, type AiProvider } from './graph';
-import { searchForChunk, searchForBounds } from './searxng';
+import { searchForChunk, searchForBounds, reverseGeocodeCenter } from './searxng';
+import type { BoundsGeoInfo } from './searxng';
 import { refineCoordinatesViaGoogle } from './geocode-refine';
 
 /**
@@ -128,7 +129,7 @@ export async function discoverExperiences(
   }
 
   const destinations = trip.dailyDestinations
-    .filter((d) => d.latitude != null && d.longitude != null)
+    .filter((d) => d.latitude != null && d.longitude != null && !d.isLayover)
     .map((d) => ({
       name: d.municipality ? `${d.name}, ${d.municipality}` : d.name,
       lat: d.latitude!,
@@ -200,13 +201,21 @@ export async function discoverExperiences(
   let totalCompletionTokens = 0;
   const knownOrUndefined = knownPlaces.length > 0 ? knownPlaces : undefined;
 
+  const fmtSize = (promptChars: number, searchChars: number) => {
+    const p = (promptChars / 1000).toFixed(1);
+    return searchChars > 0
+      ? `${p}k prompt + ${(searchChars / 1000).toFixed(1)}k search context`
+      : `${p}k chars, no search context`;
+  };
+
   if (options.useBatch && aiProvider === 'claude' && chunks.length > 0) {
     // Batch mode: submit all chunks as a single Anthropic batch
     const userPrompts = chunks.map((chunk, i) =>
       buildUserPrompt(chunk, knownOrUndefined, searchContexts[i] || undefined),
     );
-    const totalChars = userPrompts.reduce((sum, p) => sum + p.length, 0) + systemPrompt.length;
-    progress(`Sending ${(totalChars / 1000).toFixed(1)}k chars to ${providerLabel} batch (${modelLabel})...`);
+    const promptChars = userPrompts.reduce((sum, p) => sum + p.length, 0) + systemPrompt.length;
+    const searchChars = searchContexts.reduce((sum, ctx) => sum + (ctx?.length ?? 0), 0);
+    progress(`Sending ${fmtSize(promptChars - searchChars, searchChars)} to ${providerLabel} batch (${modelLabel})...`);
     const result = await callClaudeBatch(apiKey, systemPrompt, userPrompts, options.model);
     allExperiences.push(...result.experiences);
     totalPromptTokens += result.promptTokens;
@@ -214,9 +223,11 @@ export async function discoverExperiences(
   } else {
     // Sequential mode
     for (let i = 0; i < chunks.length; i++) {
-      const userPrompt = buildUserPrompt(chunks[i], knownOrUndefined, searchContexts[i] || undefined);
-      const totalChars = userPrompt.length + systemPrompt.length;
-      progress(`Sending chunk ${i + 1}/${chunks.length} (${(totalChars / 1000).toFixed(1)}k chars) to ${providerLabel} (${modelLabel})...`);
+      const searchCtx = searchContexts[i] || undefined;
+      const userPrompt = buildUserPrompt(chunks[i], knownOrUndefined, searchCtx);
+      const promptChars = userPrompt.length + systemPrompt.length - (searchCtx?.length ?? 0);
+      const searchChars = searchCtx?.length ?? 0;
+      progress(`Sending chunk ${i + 1}/${chunks.length} (${fmtSize(promptChars, searchChars)}) to ${providerLabel} (${modelLabel})...`);
       const result = await callAiProvider(aiProvider, apiKey, systemPrompt, userPrompt, options.model);
       allExperiences.push(...result.experiences);
       totalPromptTokens += result.promptTokens;
@@ -312,25 +323,43 @@ export async function discoverExperiencesByBounds(
   const providerLabel = aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
   const modelLabel = options.model || (aiProvider === 'claude' ? 'claude-sonnet-4' : 'gpt-4o');
 
+  // Reverse geocode the bounds center to get meaningful place names for both
+  // search queries and the AI prompt (avoids raw GPS coordinates).
+  const centerLat = (bounds.south + bounds.north) / 2;
+  const centerLng = (bounds.west + bounds.east) / 2;
+  let boundsGeo: BoundsGeoInfo | null = null;
+  try {
+    progress('Resolving area name...');
+    boundsGeo = await reverseGeocodeCenter(centerLat, centerLng);
+    if (boundsGeo) {
+      progress(`Area: ${boundsGeo.city}${boundsGeo.region ? ', ' + boundsGeo.region : ''}, ${boundsGeo.country}`);
+    }
+  } catch {
+    // Non-fatal — search will fall back to coordinates
+  }
+
   // Pre-fetch search results from SearXNG (if configured)
   let searchContext: string | undefined;
   if (options.searxngBaseUrl) {
     progress('Searching SearXNG for visible area...');
     const knownNames = knownPlaces.map((p) => p.name);
-    const rawContext = await searchForBounds(options.searxngBaseUrl, bounds, knownNames);
+    const rawContext = await searchForBounds(options.searxngBaseUrl, bounds, knownNames, boundsGeo);
     searchContext = rawContext || undefined;
     const searchResultCount = rawContext ? rawContext.split('\n').filter((l) => /^\d+\./.test(l)).length : 0;
     progress(`SearXNG: ${searchResultCount} results`);
   }
 
-  // Call AI provider
+  // Call AI provider — always use the direct (synchronous) API for interactive
+  // bounds queries; batch mode is for multi-chunk route discovery only.
   const systemPrompt = buildSystemPrompt();
-  const userPrompt = buildAreaUserPrompt(bounds, knownPlaces.length > 0 ? knownPlaces : undefined, searchContext);
-  const totalChars = userPrompt.length + systemPrompt.length;
-  progress(`Sending ${(totalChars / 1000).toFixed(1)}k chars to ${providerLabel} (${modelLabel})...`);
-  const result = options.useBatch && aiProvider === 'claude'
-    ? await callClaudeBatch(apiKey, systemPrompt, [userPrompt], options.model)
-    : await callAiProvider(aiProvider, apiKey, systemPrompt, userPrompt, options.model);
+  const userPrompt = buildAreaUserPrompt(bounds, knownPlaces.length > 0 ? knownPlaces : undefined, searchContext, boundsGeo);
+  const searchChars = searchContext?.length ?? 0;
+  const promptChars = userPrompt.length + systemPrompt.length - searchChars;
+  const fmtSize = searchChars > 0
+    ? `${(promptChars / 1000).toFixed(1)}k prompt + ${(searchChars / 1000).toFixed(1)}k search context`
+    : `${(promptChars / 1000).toFixed(1)}k chars, no search context`;
+  progress(`Sending ${fmtSize} to ${providerLabel} (${modelLabel})...`);
+  const result = await callAiProvider(aiProvider, apiKey, systemPrompt, userPrompt, options.model);
 
   // Deduplicate against cached
   let deduplicated = deduplicateExperiences(result.experiences)

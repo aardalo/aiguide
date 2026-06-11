@@ -46,9 +46,15 @@ interface DailyDestinationsProps {
   onPoiClick?: (poi: DailyPoiResponse) => void;
   /** Called when a destination name is clicked in the sidebar. */
   onDestinationClick?: (dest: DailyDestinationResponse) => void;
+  /** Called with status messages for the status bar (search progress, AI identification, etc.). */
+  onStatusMessage?: (text: string, detail?: string) => void;
+  /** Called to show/clear the lower-right toast popup (AI search progress). */
+  onToast?: (text: string | null) => void;
+  /** Called when a via-point is clicked in the sidebar — zoom map to that location. */
+  onViaPointClick?: (lat: number, lng: number) => void;
 }
 
-export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId, onPoiClick, onDestinationClick }: DailyDestinationsProps) {
+export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId, onPoiClick, onDestinationClick, onStatusMessage, onToast, onViaPointClick }: DailyDestinationsProps) {
   const [destinations, setDestinations] = useState<DailyDestinationResponse[]>([]);
   const [segments, setSegments] = useState<RouteSegmentResponse[]>([]);
   const [branches, setBranches] = useState<BranchResponse[]>([]);
@@ -66,8 +72,8 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
   // 'home' | destination.id | null — tracks which day badge is highlighted in the sidebar
   const [selectedDayId, setSelectedDayId] = useState<string | null>(initialSelectedDayId ?? null);
 
-  // Fetch daily destinations for the trip
-  const fetchDestinations = async () => {
+  // Fetch daily destinations for the trip — returns the fetched array
+  const fetchDestinations = async (): Promise<DailyDestinationResponse[]> => {
     setIsLoading(true);
     setError(null);
 
@@ -80,9 +86,11 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
 
       const data = await response.json();
       setDestinations(data);
+      return data;
     } catch (err) {
       console.error('[DailyDestinations] Error fetching destinations:', err);
       setError(err instanceof Error ? err.message : 'Failed to load destinations');
+      return [];
     } finally {
       setIsLoading(false);
     }
@@ -375,8 +383,10 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
         throw new Error('Failed to delete destination');
       }
       
-      // Refresh destinations list
+      // Refresh destinations list and regenerate routes so stale segments
+      // referencing the deleted destination are removed from the map.
       await fetchDestinations();
+      await generateRoutes();
       onUpdate?.();
     } catch (err) {
       console.error('[DailyDestinations] Error deleting destination:', err);
@@ -385,13 +395,92 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
   };
 
   // Handle successful form submission (create or update)
-  const handleFormSuccess = async () => {
+  const handleFormSuccess = async (savedDate: string) => {
     setShowAddForm(false);
     setAddForDate(null);
     setEditingDestination(null);
-    await fetchDestinations();
+    const freshDests = await fetchDestinations();
     await generateRoutes();
     onUpdate?.();
+
+    // Select the saved day and zoom to it on the map
+    const currentBranch = activeBranchIndex > 0 ? branches[activeBranchIndex - 1] : null;
+    const branchId = currentBranch?.id ?? null;
+    const dest = freshDests.find((d) => {
+      const dateStr = new Date(d.dayDate).toISOString().split('T')[0];
+      return dateStr === savedDate && (d.branchId ?? null) === branchId;
+    }) ?? freshDests.find((d) => {
+      const dateStr = new Date(d.dayDate).toISOString().split('T')[0];
+      return dateStr === savedDate;
+    });
+    if (dest) {
+      setSelectedDayId(dest.id);
+      onDaySelect?.(dest.id);
+      if (dest.latitude != null && dest.longitude != null) {
+        onDestinationClick?.(dest);
+      }
+      // Scroll after React re-renders with the new selection
+      setTimeout(() => {
+        document.querySelector(`[data-day-id="${dest.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 0);
+    }
+  };
+
+  // Create a layover for an empty day (copies previous destination's data)
+  const handleSetLayover = async (dateStr: string) => {
+    // Find the most recent non-layover destination before this date
+    const sorted = [...destinations]
+      .filter((d) => !d.isLayover && d.latitude != null && d.longitude != null)
+      .sort((a, b) => new Date(a.dayDate).getTime() - new Date(b.dayDate).getTime());
+    const prev = sorted.filter((d) => new Date(d.dayDate).toISOString().split('T')[0] < dateStr).pop();
+    if (!prev) return;
+
+    try {
+      const res = await fetch('/api/daily-destinations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tripId: trip.id,
+          dayDate: dateStr,
+          name: prev.name,
+          municipality: prev.municipality,
+          latitude: prev.latitude,
+          longitude: prev.longitude,
+          isLayover: true,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        console.error('[DailyDestinations] Layover creation failed:', data.error);
+        return;
+      }
+      await fetchDestinations();
+      await generateRoutes();
+      onUpdate?.();
+    } catch (err) {
+      console.error('[DailyDestinations] Layover error:', err);
+    }
+  };
+
+  // Convert an existing destination to/from layover
+  const handleToggleLayover = async (destId: string, setLayover: boolean) => {
+    try {
+      const res = await fetch(`/api/daily-destinations/${destId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isLayover: setLayover }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        console.error('[DailyDestinations] Toggle layover failed:', data.error);
+        return;
+      }
+      await fetchDestinations();
+      await generateRoutes();
+      onUpdate?.();
+    } catch (err) {
+      console.error('[DailyDestinations] Toggle layover error:', err);
+    }
   };
 
   // Remove a day from the trip
@@ -835,6 +924,7 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
               )}
 
               <div
+                data-day-id={destination?.id}
                 className={`relative p-3 rounded-lg border transition-colors group/day ${isLinked ? 'bg-neutral-50/60 border-neutral-200 opacity-70' : 'bg-neutral-50 border-neutral-200 hover:bg-neutral-100'}`}
                 style={!isLinked && activeBranch ? { borderLeftWidth: '4px', borderLeftColor: cardColor } : undefined}
               >
@@ -853,8 +943,8 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                             onDaySelect?.(selId);
                           }
                         }}
-                        className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold transition-colors text-white ${dayLabel.length > 2 ? 'text-[10px]' : 'text-sm'}`}
-                        style={{ backgroundColor: cardColor }}
+                        className={`w-8 h-8 rounded-full flex items-center justify-center font-semibold transition-colors ${dayLabel.length > 2 ? 'text-[10px]' : 'text-sm'} ${selectedDayId === (destination?.id ?? null) ? 'text-white' : 'border-2'}`}
+                        style={selectedDayId === (destination?.id ?? null) ? { backgroundColor: cardColor } : { borderColor: cardColor, color: cardColor }}
                         title={segment || destination?.latitude != null ? 'Zoom to this day' : undefined}
                       >
                         {dayLabel}
@@ -869,26 +959,38 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                       </p>
                       {destination ? (
                         <div className="mt-1">
-                          <p
-                            className={`text-sm text-neutral-700 ${destination.latitude != null && destination.longitude != null && onDestinationClick ? 'cursor-pointer hover:text-primary-600' : ''}`}
-                            onClick={() => {
-                              if (destination.latitude != null && destination.longitude != null && onDestinationClick) {
-                                onDestinationClick(destination);
-                              }
-                            }}
-                          >
-                            {destination.name}
-                            {destination.municipality && (
-                              <span className="text-neutral-400"> ({destination.municipality})</span>
-                            )}
-                          </p>
-                          {destination.notes && (
-                            <p className="text-xs text-neutral-500 mt-0.5">{destination.notes}</p>
-                          )}
-                          {destination.latitude && destination.longitude && (
-                            <p className="text-xs text-neutral-400 mt-0.5">
-                              {destination.latitude.toFixed(4)}, {destination.longitude.toFixed(4)}
+                          {destination.isLayover ? (
+                            <p className="text-sm text-neutral-500 italic flex items-center gap-1.5">
+                              <span className="text-base leading-none">🛏️</span>
+                              Layover at {destination.name}
+                              {destination.municipality && (
+                                <span className="text-neutral-400">({destination.municipality})</span>
+                              )}
                             </p>
+                          ) : (
+                            <>
+                              <p
+                                className={`text-sm text-neutral-700 ${destination.latitude != null && destination.longitude != null && onDestinationClick ? 'cursor-pointer hover:text-primary-600' : ''}`}
+                                onClick={() => {
+                                  if (destination.latitude != null && destination.longitude != null && onDestinationClick) {
+                                    onDestinationClick(destination);
+                                  }
+                                }}
+                              >
+                                {destination.name}
+                                {destination.municipality && (
+                                  <span className="text-neutral-400"> ({destination.municipality})</span>
+                                )}
+                              </p>
+                              {destination.notes && (
+                                <p className="text-xs text-neutral-500 mt-0.5">{destination.notes}</p>
+                              )}
+                              {destination.latitude && destination.longitude && (
+                                <p className="text-xs text-neutral-400 mt-0.5">
+                                  {destination.latitude.toFixed(4)}, {destination.longitude.toFixed(4)}
+                                </p>
+                              )}
+                            </>
                           )}
                         </div>
                       ) : (
@@ -898,7 +1000,7 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                   </div>
 
                   {/* Edit/delete/move buttons (not on linked context days) */}
-                  {!isLinked && destination && (
+                  {!isLinked && destination && !destination.isLayover && (
                     <div className="flex items-center gap-1">
                       <div className="flex items-center gap-1">
                         <button
@@ -948,24 +1050,64 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                     </div>
                   )}
 
+                  {/* Layover action buttons: convert back + delete */}
+                  {!isLinked && destination?.isLayover && (
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          handleToggleLayover(destination.id, false);
+                          setEditingDestination(destination);
+                        }}
+                        className="p-1 text-neutral-400 hover:text-primary-600 transition-colors"
+                        title="Set a new destination"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => handleDelete(destination.id)}
+                        className="p-1 text-neutral-400 hover:text-error-600 transition-colors"
+                        title="Delete layover"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Empty day: add destination + layover buttons */}
                   {!isLinked && !destination && (
-                    <button
-                      onClick={() => {
-                        setAddForDate(dateStr);
-                        setShowAddForm(true);
-                      }}
-                      className="p-1 text-neutral-400 hover:text-primary-600 transition-colors"
-                      title="Add destination"
-                    >
-                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-                      </svg>
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => {
+                          setAddForDate(dateStr);
+                          setShowAddForm(true);
+                        }}
+                        className="p-1 text-neutral-400 hover:text-primary-600 transition-colors"
+                        title="Add destination"
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+                        </svg>
+                      </button>
+                      {/* Layover button — only if there's a previous destination to copy from, and not first day */}
+                      {vdIndex > 0 && destinations.some((d) => !d.isLayover && d.latitude != null && new Date(d.dayDate).toISOString().split('T')[0] < dateStr) && (
+                        <button
+                          onClick={() => handleSetLayover(dateStr)}
+                          className="p-1 text-neutral-400 hover:text-info-600 transition-colors"
+                          title="Layover (stay at previous destination)"
+                        >
+                          <span className="text-sm leading-none">🛏️</span>
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
 
-                {/* Route segment info */}
-                {segment && (
+                {/* Route segment info (hidden for layovers) */}
+                {segment && !destination?.isLayover && (
                   <div className="mt-2 ml-11 flex items-center gap-3 text-xs text-neutral-500">
                     <span>{formatDistance(segment.distanceMeters)}</span>
                     <span>·</span>
@@ -974,12 +1116,24 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                   </div>
                 )}
 
-                {/* Parkups + POIs */}
-                {dayPois.length > 0 && (() => {
+                {/* Via-points + Parkups + POIs */}
+                {(() => {
+                  const viaPoints = (segment?.waypoints ?? []).filter((wp) => wp.isManual);
                   const parkups = dayPois.filter((p) => p.category === 'parkup');
                   const regularPois = dayPois.filter((p) => p.category !== 'parkup');
+                  if (viaPoints.length === 0 && dayPois.length === 0) return null;
                   return (
                     <div className="mt-1.5 ml-11 flex flex-col gap-0.5">
+                      {viaPoints.map((wp) => (
+                        <div
+                          key={wp.id}
+                          className={`flex items-center gap-1.5 text-xs text-orange-700 ${onViaPointClick ? 'cursor-pointer hover:text-orange-900' : ''}`}
+                          onClick={() => onViaPointClick?.(wp.latitude, wp.longitude)}
+                        >
+                          <span className="shrink-0">◆</span>
+                          <span className="truncate">Via-point</span>
+                        </div>
+                      ))}
                       {parkups.map((p) => (
                         <div
                           key={p.id}
@@ -1012,6 +1166,8 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                       destination={editingDestination && destination && editingDestination.id === destination.id ? editingDestination : null}
                       initialDate={addForDate}
                       onSuccess={handleFormSuccess}
+                      onStatusMessage={onStatusMessage}
+                      onToast={onToast}
                       onCancel={() => {
                         setShowAddForm(false);
                         setAddForDate(null);
@@ -1077,11 +1233,13 @@ interface DestinationFormProps {
   trip: TripResponse;
   destination?: DailyDestinationResponse | null;
   initialDate?: string | null;
-  onSuccess: () => void;
+  onSuccess: (savedDate: string) => void;
   onCancel: () => void;
+  onStatusMessage?: (text: string, detail?: string) => void;
+  onToast?: (text: string | null) => void;
 }
 
-function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel }: DestinationFormProps) {
+function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel, onStatusMessage, onToast }: DestinationFormProps) {
   // Core form fields
   const [dayDate, setDayDate] = useState(
     destination?.dayDate.split('T')[0] || initialDate || trip.startDate.toString().split('T')[0],
@@ -1115,14 +1273,23 @@ function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel }
   const placeCoordsRef = useRef(placeCoords);
   placeCoordsRef.current = placeCoords;
 
-  // Debounced place search — fires 400ms after name stops changing
+  // When AI sets the name, skip the next search trigger (results are already shown)
+  const skipNextSearchRef = useRef(false);
+
+  // Debounced place search with AI fallback — fires 400ms after name stops changing
   useEffect(() => {
+    if (skipNextSearchRef.current) {
+      skipNextSearchRef.current = false;
+      return;
+    }
+
     const trimmed = name.trim();
 
     if (trimmed.length < 3) {
       setSearchResults([]);
       setShowDropdown(false);
       setNoResults(false);
+
       return;
     }
 
@@ -1133,28 +1300,88 @@ function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel }
     setShowDropdown(false);
     setNoResults(false);
 
+    const abortController = new AbortController();
+    const signal = abortController.signal;
+
+    const geocode = async (query: string): Promise<PlaceResult[]> => {
+      const res = await fetch(`/api/geocode?q=${encodeURIComponent(query)}&limit=5`, { signal });
+      if (!res.ok) return [];
+      return res.json();
+    };
+
     const timer = setTimeout(async () => {
       setIsSearching(true);
       try {
-        const res = await fetch(`/api/geocode?q=${encodeURIComponent(trimmed)}&limit=5`);
-        if (res.ok) {
-          const data: PlaceResult[] = await res.json();
-          setSearchResults(data);
-          setShowDropdown(data.length > 0);
-          setNoResults(data.length === 0);
+        // Step 1: Direct Nominatim search
+        onStatusMessage?.(`Searching for "${trimmed}"...`);
+        const directResults = await geocode(trimmed);
+        if (signal.aborted) return;
+
+        if (directResults.length > 0) {
+          setSearchResults(directResults);
+          setShowDropdown(true);
+          onStatusMessage?.(`Found ${directResults.length} result${directResults.length > 1 ? 's' : ''}`);
+          return;
         }
-      } catch {
-        // Geocoding unavailable — silently degrade
+
+        // Step 2: AI identify the place from the description
+        onToast?.('No results — asking AI to identify the place...');
+        const aiRes = await fetch('/api/geocode/ai-identify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: trimmed }),
+          signal,
+        });
+        if (signal.aborted) return;
+
+        if (!aiRes.ok) {
+          setNoResults(true);
+          onToast?.(`AI identification failed (status ${aiRes.status})`);
+          return;
+        }
+
+        const aiResult = await aiRes.json();
+        if (signal.aborted) return;
+
+        if (!aiResult.name) {
+          setNoResults(true);
+          onToast?.('AI could not identify the place');
+          return;
+        }
+
+        onToast?.(`AI identified: ${aiResult.name}\n${aiResult.reasoning}`);
+
+        // Step 3: Feed AI name back into the form field and geocode it
+        skipNextSearchRef.current = true;
+        setName(aiResult.name);
+        const aiGeocodeResults = await geocode(aiResult.searchQuery);
+        if (signal.aborted) return;
+
+        if (aiGeocodeResults.length > 0) {
+          setSearchResults(aiGeocodeResults);
+          setShowDropdown(true);
+          onToast?.(`AI identified: ${aiResult.name}\n${aiResult.reasoning}\n\nFound ${aiGeocodeResults.length} result${aiGeocodeResults.length > 1 ? 's' : ''}`);
+        } else {
+          setNoResults(true);
+          onToast?.(`AI identified: ${aiResult.name}\n${aiResult.reasoning}\n\nCould not find in geocoding`);
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        // Geocoding/AI unavailable — silently degrade
       } finally {
-        setIsSearching(false);
+        if (!signal.aborted) setIsSearching(false);
       }
     }, 400);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      abortController.abort();
+    };
   }, [name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleNameChange = (value: string) => {
     setName(value);
+    onToast?.(null);
     // Clear the selection so a new search is triggered
     if (placeCoords) {
       setPlaceCoords(null);
@@ -1221,7 +1448,7 @@ function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel }
         throw new Error(errorData.error || 'Failed to save destination');
       }
 
-      onSuccess();
+      onSuccess(dayDate);
     } catch (err) {
       console.error('[DestinationForm] Error saving destination:', err);
       setError(err instanceof Error ? err.message : 'Failed to save destination');
@@ -1265,12 +1492,17 @@ function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel }
             disabled={!!initialDate && !destination}
             className="mt-1 block w-full rounded-md border border-neutral-300 px-3 py-2.5 text-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-all disabled:bg-neutral-50 disabled:text-neutral-500 disabled:cursor-default"
           />
+          {destination && (
+            <p className="text-xs text-neutral-500 mt-1.5">
+              This only updates this day. To shift the full journey timeline, edit the trip start date.
+            </p>
+          )}
         </div>
 
         {/* Place name + typeahead */}
         <div>
           <label htmlFor="name" className="block text-sm font-medium text-neutral-700">
-            Destination <span className="text-error-500">*</span>
+            Describe or search for a place <span className="text-error-500">*</span>
           </label>
 
           <div className="relative mt-1">
@@ -1281,7 +1513,7 @@ function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel }
               onChange={(e) => handleNameChange(e.target.value)}
               required
               maxLength={200}
-              placeholder="Type a city or place name…"
+              placeholder="City name or description, e.g. 'the lake with a submerged bell tower'…"
               autoComplete="off"
               className="block w-full rounded-md border border-neutral-300 px-3 py-2.5 pr-8 text-sm focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500 transition-all"
             />
@@ -1313,7 +1545,7 @@ function DestinationForm({ trip, destination, initialDate, onSuccess, onCancel }
 
           {/* No results note */}
           {noResults && !isSearching && (
-            <p className="mt-1 text-xs text-neutral-500">No places found. You can still save without a location pin.</p>
+            <p className="mt-1 text-xs text-neutral-500">No places found (including AI-assisted search). You can still save without a location pin.</p>
           )}
 
           {/* Results dropdown */}

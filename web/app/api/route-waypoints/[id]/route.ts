@@ -31,6 +31,7 @@ import { getSetting, SETTING_KEYS } from '@/lib/settings';
 const patchBodySchema = z.object({
   latitude: z.number(),
   longitude: z.number(),
+  deviceId: z.string().cuid().optional(),
 });
 
 /**
@@ -140,7 +141,6 @@ export async function DELETE(
         distanceMeters: result.totalDistanceMeters,
         durationSeconds: result.totalDurationSeconds,
         encodedPolyline,
-        provider: provider.id,
       },
     });
 
@@ -199,7 +199,7 @@ export async function PATCH(
       );
     }
 
-    const { latitude: newLat, longitude: newLng } = validation.data;
+    const { latitude: newLat, longitude: newLng, deviceId } = validation.data;
 
     // Find waypoint and its owning segment, including all sibling waypoints
     const waypoint = await prisma.routeWaypoint.findUnique({
@@ -305,6 +305,7 @@ export async function PATCH(
         durationSeconds: result.totalDurationSeconds,
         encodedPolyline,
         provider: provider.id,
+        lastModifiedByDeviceId: deviceId || null,
       },
     });
 

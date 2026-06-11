@@ -10,6 +10,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { dailyDestinationUpdateSchema } from "@/lib/schemas/trip";
 
@@ -57,6 +58,7 @@ export async function PATCH(
     const { id } = await params;
     const body = await request.json();
 
+    const deviceId = (body as Record<string, unknown>).deviceId as string | undefined;
     // Validate request payload
     const validation = dailyDestinationUpdateSchema.safeParse(body);
     if (!validation.success) {
@@ -74,7 +76,7 @@ export async function PATCH(
     // Check if daily destination exists
     const existingDestination = await prisma.dailyDestination.findUnique({
       where: { id },
-      include: { trip: true },
+      include: { trip: true, branch: true },
     });
 
     if (!existingDestination) {
@@ -99,16 +101,54 @@ export async function PATCH(
           { status: 400 }
         );
       }
+
+      if (existingDestination.branchId && existingDestination.branch && dayDate < existingDestination.branch.anchorDayDate) {
+        return NextResponse.json(
+          { error: "Branch destinations cannot be scheduled before the fork anchor day" },
+          { status: 400 }
+        );
+      }
+
+      const existingForDate = await prisma.dailyDestination.findFirst({
+        where: {
+          tripId: existingDestination.tripId,
+          dayDate,
+          branchId: existingDestination.branchId,
+          id: { not: id },
+        },
+        select: { id: true },
+      });
+
+      if (existingForDate) {
+        return NextResponse.json(
+          { error: "A destination already exists for this date. Use Edit to update it." },
+          { status: 409 }
+        );
+      }
+    }
+
+    // Layover cannot be the first day of the trip
+    if (data.isLayover) {
+      const tripStartStr = existingDestination.trip.startDate.toISOString().slice(0, 10);
+      const destDateStr = existingDestination.dayDate.toISOString().slice(0, 10);
+      if (destDateStr === tripStartStr) {
+        return NextResponse.json(
+          { error: "The first day of a trip cannot be a layover" },
+          { status: 400 }
+        );
+      }
     }
 
     // Update daily destination
-    const updateData: any = {};
+    const updateData: Record<string, unknown> = {};
     if (data.dayDate !== undefined) updateData.dayDate = new Date(data.dayDate);
     if (data.name !== undefined) updateData.name = data.name;
     if (data.municipality !== undefined) updateData.municipality = data.municipality;
     if (data.latitude !== undefined) updateData.latitude = data.latitude;
     if (data.longitude !== undefined) updateData.longitude = data.longitude;
     if (data.notes !== undefined) updateData.notes = data.notes;
+    if (data.isLayover !== undefined) updateData.isLayover = data.isLayover;
+    if (deviceId) updateData.lastModifiedByDeviceId = deviceId;
 
     const updatedDestination = await prisma.dailyDestination.update({
       where: { id },
@@ -117,6 +157,15 @@ export async function PATCH(
 
     return NextResponse.json(updatedDestination, { status: 200 });
   } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      return NextResponse.json(
+        { error: "A destination already exists for this date. Use Edit to update it." },
+        { status: 409 }
+      );
+    }
     console.error("[PATCH /api/daily-destinations/[id]] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -147,6 +196,17 @@ export async function DELETE(
         { status: 404 }
       );
     }
+
+    // Delete route segments that reference this destination (fromDestinationId
+    // and toDestinationId are plain strings, not FK constraints, so no cascade).
+    await prisma.routeSegment.deleteMany({
+      where: {
+        OR: [
+          { fromDestinationId: id },
+          { toDestinationId: id },
+        ],
+      },
+    });
 
     // Delete daily destination
     const deletedDestination = await prisma.dailyDestination.delete({

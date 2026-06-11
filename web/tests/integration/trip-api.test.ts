@@ -6,6 +6,11 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { prisma } from "@/lib/prisma";
+import {
+  ALLOW_TRIP_DELETE_HEADER,
+  ALLOW_TRIP_DELETE_VALUE,
+  TEST_TRIP_MARKER,
+} from "@/lib/trip-delete-safeguard";
 
 // Helper to make API requests
 const API_BASE = "http://localhost:3000";
@@ -392,10 +397,10 @@ describe("Trip API Endpoints", () => {
   });
 
   describe("DELETE /api/trips/[id] - Delete Trip", () => {
-    it("should delete a trip by ID", async () => {
+    it("should delete a marked test trip by ID", async () => {
       const trip = await prisma.trip.create({
         data: {
-          title: "Trip to Delete via API",
+          title: `Trip to Delete via API ${TEST_TRIP_MARKER}`,
           startDate: new Date("2027-03-01"),
           stopDate: new Date("2027-03-05"),
         },
@@ -415,6 +420,45 @@ describe("Trip API Endpoints", () => {
         method: "GET",
       });
       expect(verifyResponse.status).toBe(404);
+    });
+
+    it("should block deleting an unmarked trip in non-production", async () => {
+      const trip = await prisma.trip.create({
+        data: {
+          title: "Protected Dev Trip",
+          startDate: new Date("2027-04-01"),
+          stopDate: new Date("2027-04-05"),
+        },
+      });
+      createdTripIds.push(trip.id);
+
+      const response = await makeRequest(`/api/trips/${trip.id}`, {
+        method: "DELETE",
+      });
+
+      expect(response.status).toBe(403);
+
+      const error = await response.json();
+      expect(error.code).toBe("trip_delete_blocked_in_non_production");
+    });
+
+    it("should allow deleting an unmarked trip when the safeguard is explicitly overridden", async () => {
+      const trip = await prisma.trip.create({
+        data: {
+          title: "Explicit Override Trip",
+          startDate: new Date("2027-05-01"),
+          stopDate: new Date("2027-05-05"),
+        },
+      });
+
+      const response = await makeRequest(`/api/trips/${trip.id}`, {
+        method: "DELETE",
+        headers: {
+          [ALLOW_TRIP_DELETE_HEADER]: ALLOW_TRIP_DELETE_VALUE,
+        },
+      });
+
+      expect(response.status).toBe(200);
     });
 
     it("should return 404 when deleting non-existent trip", async () => {

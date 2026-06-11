@@ -254,7 +254,18 @@
 ## Day 2 (March 3, 2026)
 
 ### Completed
-- [ ] 
+- [x] Trip edit flow upgraded to derived timeline model in current environment re-verification
+- [x] `PATCH /api/trips/:id` now shifts all day-scoped records when `startDate` changes and derives `stopDate`
+- [x] Single-day date edits hardened with explicit `400`/`409` responses instead of generic `500`
+- [x] Branch/fork anchor day model added and synchronized across trip shift / insert-day / remove-day flows
+- [x] Route generation guarded against pre-anchor branch segments
+- [x] Prisma migration applied for branch anchor day support and local database confirmed up to date
+- [x] Fresh targeted regression evidence captured: 7 files / 44 tests passed
+
+### Notes
+- A temporary "Failed to update trip / Internal server error" was reproduced only on the trip start-date shift path.
+- Root cause was stale Next.js server state after Prisma client/schema changes, not a surviving code defect.
+- Restarting the app with `scripts/dev-server.sh restart` resolved the issue; the same live trip update then succeeded and the verification trip state was restored.
 
 ### In Progress
 - [ ] 

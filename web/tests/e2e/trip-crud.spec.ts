@@ -6,29 +6,43 @@
  */
 
 import { test, expect } from '@playwright/test';
+import {
+  cleanupMarkedTrips,
+  markTripPayloadForCleanupWithScope,
+} from './helpers/testTrips';
+
+const CLEANUP_SCOPE = 'trip-crud-e2e';
 
 // Test data
-const TEST_TRIP = {
+const TEST_TRIP = markTripPayloadForCleanupWithScope({
   title: 'Summer Road Trip 2026',
   description: 'An amazing journey across the western United States',
   startDate: '2026-06-01',
   stopDate: '2026-06-15',
-};
+}, CLEANUP_SCOPE);
 
-const TEST_TRIP_2 = {
+const TEST_TRIP_2 = markTripPayloadForCleanupWithScope({
   title: 'Weekend Getaway',
   description: 'Quick trip to the mountains',
   startDate: '2026-07-10',
   stopDate: '2026-07-12',
-};
+}, CLEANUP_SCOPE);
 
 test.describe('Trip Management - Full CRUD Flow', () => {
-  test.beforeEach(async ({ page }) => {
+  test.describe.configure({ mode: 'serial' });
+
+  test.beforeEach(async ({ page, request }) => {
+    await cleanupMarkedTrips(request, CLEANUP_SCOPE);
+
     // Navigate to the map page
     await page.goto('/map');
-    
-    // Wait for map to load
-    await expect(page.getByText('🗺️ Map Ready')).toBeVisible({ timeout: 10000 });
+
+    // Wait for the trip creation UI to be interactive.
+    await expect(page.getByLabel(/trip title/i)).toBeVisible({ timeout: 10000 });
+  });
+
+  test.afterEach(async ({ request }) => {
+    await cleanupMarkedTrips(request, CLEANUP_SCOPE);
   });
 
   test('should create a new trip and display it in the list', async ({ page }) => {
@@ -202,9 +216,16 @@ test.describe('Trip Management - Full CRUD Flow', () => {
 });
 
 test.describe('Trip Form Validation', () => {
-  test.beforeEach(async ({ page }) => {
+  test.describe.configure({ mode: 'serial' });
+
+  test.beforeEach(async ({ page, request }) => {
+    await cleanupMarkedTrips(request, CLEANUP_SCOPE);
     await page.goto('/map');
-    await expect(page.getByText('🗺️ Map Ready')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByLabel(/trip title/i)).toBeVisible({ timeout: 10000 });
+  });
+
+  test.afterEach(async ({ request }) => {
+    await cleanupMarkedTrips(request, CLEANUP_SCOPE);
   });
 
   test('should show validation errors for missing required fields', async ({ page }) => {

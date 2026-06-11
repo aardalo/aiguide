@@ -43,7 +43,7 @@ const bodySchema = z.object({
   lat: z.number(),
   lng: z.number(),
   radiusMeters: z.number().min(100).max(25_000),
-  type: z.enum(VALID_TYPES),
+  types: z.array(z.enum(VALID_TYPES)).min(1).max(VALID_TYPES.length),
 });
 
 export async function POST(request: NextRequest) {
@@ -54,20 +54,30 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const parsed = bodySchema.safeParse(body);
+  // Support legacy single `type` field by converting to `types` array
+  const raw = body as Record<string, unknown>;
+  if (raw.type && !raw.types) {
+    raw.types = [raw.type];
+    delete raw.type;
+  }
+
+  const parsed = bodySchema.safeParse(raw);
   if (!parsed.success) {
     return NextResponse.json(
       { error: 'Invalid request', issues: parsed.error.flatten() },
       { status: 400 },
     );
   }
-  const { lat, lng, radiusMeters, type } = parsed.data;
+  const { lat, lng, radiusMeters, types } = parsed.data;
 
   // Determine active map provider (for search backend selection)
   const mapProvider = await getSetting(SETTING_KEYS.MAP_PROVIDER);
 
   // Phase 1: Neo4j graph cache (graceful degradation if unavailable)
-  const cached = await searchNearbyCache(lat, lng, radiusMeters, type);
+  const cachedByType = await Promise.all(
+    types.map((type) => searchNearbyCache(lat, lng, radiusMeters, type)),
+  );
+  const cached = cachedByType.flat();
   const cachedIds = new Set(cached.map((p) => p.placeId));
 
   // Phase 2: external search — Google Places when map.provider=google, else Overpass
@@ -84,34 +94,40 @@ export async function POST(request: NextRequest) {
           headers: {
             'Content-Type': 'application/json',
             'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': 'places.id,places.displayName,places.location,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours.weekdayDescriptions,places.rating,places.userRatingCount',
+            'X-Goog-FieldMask': 'places.id,places.types,places.displayName,places.location,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.regularOpeningHours.weekdayDescriptions,places.rating,places.userRatingCount',
           },
           body: JSON.stringify({
             locationRestriction: {
               circle: { center: { latitude: lat, longitude: lng }, radius: radiusMeters },
             },
-            includedTypes: [type],
+            includedTypes: types,
             maxResultCount: 20,
           }),
+          signal: AbortSignal.timeout(10_000),
         });
         if (res.ok) {
           const data = await res.json();
-          for (const p of (data.places ?? []) as any[]) {
+          for (const p of (data.places ?? []) as Record<string, unknown>[]) {
             const placeId = `google:${p.id}`;
             if (cachedIds.has(placeId)) continue;
-            const hours: string[] | undefined = p.regularOpeningHours?.weekdayDescriptions;
+            const loc = p.location as Record<string, number>;
+            const displayName = p.displayName as Record<string, string> | undefined;
+            const hours = (p.regularOpeningHours as Record<string, unknown>)?.weekdayDescriptions as string[] | undefined;
+            // Determine which of our requested types this place matches
+            const googleTypes = (p.types as string[]) ?? [];
+            const placeType = types.find((t) => googleTypes.includes(t)) ?? types[0];
             freshPlaces.push({
               placeId,
-              name: p.displayName?.text ?? p.id,
-              lat: p.location.latitude,
-              lng: p.location.longitude,
-              type,
-              website:      p.websiteUri             ?? undefined,
-              phone:        p.nationalPhoneNumber     ?? undefined,
-              openingHours: hours?.join('\n')          ?? undefined,
-              address:      p.formattedAddress        ?? undefined,
-              rating:       p.rating                  ?? undefined,
-              ratingCount:  p.userRatingCount          ?? undefined,
+              name: displayName?.text ?? String(p.id),
+              lat: loc.latitude,
+              lng: loc.longitude,
+              type: placeType,
+              website:      (p.websiteUri as string)             ?? undefined,
+              phone:        (p.nationalPhoneNumber as string)     ?? undefined,
+              openingHours: hours?.join('\n')                      ?? undefined,
+              address:      (p.formattedAddress as string)        ?? undefined,
+              rating:       (p.rating as number)                  ?? undefined,
+              ratingCount:  (p.userRatingCount as number)          ?? undefined,
             });
           }
         } else {
@@ -123,30 +139,37 @@ export async function POST(request: NextRequest) {
     }
   } else {
     // Overpass API (OpenStreetMap) — no API key required
-    const osmTags = OSM_TAGS[type];
-    if (osmTags) {
+    // Combine OSM tags from all selected types into a single query
+    const allTags = types.flatMap((t) => OSM_TAGS[t] ?? []);
+    if (allTags.length > 0) {
       try {
-        const query = buildOverpassQuery(osmTags, radiusMeters, lat, lng);
+        const query = buildOverpassQuery(allTags, radiusMeters, lat, lng);
         const res = await fetch('https://overpass-api.de/api/interpreter', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: `data=${encodeURIComponent(query)}`,
+          signal: AbortSignal.timeout(10_000),
         });
 
         if (res.ok) {
           const data = await res.json();
-          for (const el of (data.elements ?? []) as any[]) {
+          for (const el of (data.elements ?? []) as Record<string, unknown>[]) {
             const placeId = `osm:${el.type}:${el.id}`;
             if (cachedIds.has(placeId)) continue;
             // Nodes have lat/lon directly; ways/relations expose a computed centre
-            const elLat: number | undefined = el.lat ?? el.center?.lat;
-            const elLng: number | undefined = el.lon ?? el.center?.lon;
+            const center = el.center as Record<string, number> | undefined;
+            const elLat: number | undefined = (el.lat as number) ?? center?.lat;
+            const elLng: number | undefined = (el.lon as number) ?? center?.lon;
             if (elLat == null || elLng == null) continue;
+            const tags = (el.tags ?? {}) as Record<string, string>;
             const name: string =
-              el.tags?.name ||
-              el.tags?.['name:en'] ||
-              `${type.replace(/_/g, ' ')} ${el.id}`;
-            const tags = el.tags ?? {};
+              tags.name ||
+              tags['name:en'] ||
+              `Place ${el.id}`;
+            // Determine which of our requested types this element matches
+            const matchedType = types.find((t) =>
+              (OSM_TAGS[t] ?? []).some(({ key, value }) => tags[key] === value),
+            ) ?? types[0];
             // Build a short address from available OSM addr:* tags
             const addrParts = [
               tags['addr:housenumber'] && tags['addr:street']
@@ -160,7 +183,7 @@ export async function POST(request: NextRequest) {
               name,
               lat: elLat,
               lng: elLng,
-              type,
+              type: matchedType,
               website:      tags.website          ?? undefined,
               phone:        tags.phone            ?? undefined,
               openingHours: tags.opening_hours    ?? undefined,

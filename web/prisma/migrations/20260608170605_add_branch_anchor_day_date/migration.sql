@@ -1,0 +1,2 @@
+-- DropIndex (removed - index doesn't exist)
+-- DROP INDEX "branches_trip_id_anchor_day_date_idx";

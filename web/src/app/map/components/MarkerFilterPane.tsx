@@ -24,6 +24,7 @@ interface MarkerFilterPaneProps {
   onToggleItem: (groupKey: string, itemKey: string) => void;
   onToggleGroup: (groupKey: string) => void;
   onClose: () => void;
+  touchMode?: boolean;
 }
 
 export default function MarkerFilterPane({
@@ -32,6 +33,7 @@ export default function MarkerFilterPane({
   onToggleItem,
   onToggleGroup,
   onClose,
+  touchMode = false,
 }: MarkerFilterPaneProps) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -52,7 +54,9 @@ export default function MarkerFilterPane({
   if (groups.length === 0 || totalAll === 0) return null;
 
   return (
-    <div className="absolute top-3 left-3 z-[700] select-none">
+    <div
+      className={`absolute z-[700] select-none ${touchMode ? 'top-3 right-3 max-w-[calc(100%-1.5rem)]' : 'top-3 left-3'}`}
+    >
       {/* Header bar — always visible */}
       <div
         className="flex items-center gap-2 bg-white rounded-lg shadow-lg border border-neutral-200 px-3 py-2 cursor-pointer"
@@ -81,7 +85,7 @@ export default function MarkerFilterPane({
 
       {/* Expandable body */}
       {!collapsed && (
-        <div className="mt-1 bg-white rounded-lg shadow-lg border border-neutral-200 max-h-[60vh] overflow-y-auto w-56">
+        <div className={`mt-1 bg-white rounded-lg shadow-lg border border-neutral-200 max-h-[60vh] overflow-y-auto ${touchMode ? 'w-72 max-w-[calc(100vw-1.5rem)]' : 'w-56'}`}>
           {groups.map((group) => (
             <div key={group.key} className="border-b border-neutral-100 last:border-b-0">
               {/* Group header */}

@@ -50,16 +50,25 @@ export async function POST(request: NextRequest) {
     }
 
     const { tripId, branchId } = validation.data;
+    const deviceId = (body as Record<string, unknown>).deviceId as string | undefined;
     const effectiveBranchId = branchId ?? null;
 
     // Load destinations, home setting, and trip preferences in parallel
-    const [allDestinations, homeName, homeLatStr, homeLngStr, trip] = await Promise.all([
+    const [allDestinations, homeName, homeLatStr, homeLngStr, trip, branch] = await Promise.all([
       prisma.dailyDestination.findMany({ where: { tripId }, orderBy: { dayDate: 'asc' } }),
       getSetting(SETTING_KEYS.HOME_NAME),
       getSetting(SETTING_KEYS.HOME_LATITUDE),
       getSetting(SETTING_KEYS.HOME_LONGITUDE),
       prisma.trip.findUnique({ where: { id: tripId }, select: { routingPreferences: true } }),
+      effectiveBranchId ? prisma.branch.findUnique({ where: { id: effectiveBranchId } }) : Promise.resolve(null),
     ]);
+
+    if (effectiveBranchId && (!branch || branch.tripId !== tripId)) {
+      return NextResponse.json(
+        { error: 'Branch not found for this trip' },
+        { status: 404 },
+      );
+    }
 
     const preferences = trip?.routingPreferences
       ? JSON.parse(trip.routingPreferences)
@@ -71,9 +80,19 @@ export async function POST(request: NextRequest) {
       ? allDestinations.filter((d) => d.branchId === effectiveBranchId)
       : mainDests;
 
-    // Filter to only destinations that have coordinates
+    if (effectiveBranchId && branch) {
+      const hasPreAnchorDest = targetDests.some((d) => d.dayDate < branch.anchorDayDate);
+      if (hasPreAnchorDest) {
+        return NextResponse.json(
+          { error: 'Branch route segments cannot be generated before the fork anchor day' },
+          { status: 409 },
+        );
+      }
+    }
+
+    // Filter to only destinations that have coordinates and are not layovers
     const withCoords = targetDests.filter(
-      (d) => d.latitude !== null && d.longitude !== null,
+      (d) => d.latitude !== null && d.longitude !== null && !d.isLayover,
     );
 
     // Build ordered route points: home (if set) then destinations
@@ -97,7 +116,7 @@ export async function POST(request: NextRequest) {
     if (effectiveBranchId && destPoints.length > 0) {
       const firstBranchDate = destPoints[0].dayDate!;
       const lastBranchDate = destPoints[destPoints.length - 1].dayDate!;
-      const mainWithCoords = mainDests.filter((d) => d.latitude !== null && d.longitude !== null);
+      const mainWithCoords = mainDests.filter((d) => d.latitude !== null && d.longitude !== null && !d.isLayover);
 
       // Entry: last main-branch dest with date < first branch date
       const entryDest = [...mainWithCoords].reverse().find((d) => d.dayDate < firstBranchDate);
@@ -194,7 +213,7 @@ export async function POST(request: NextRequest) {
         if (existingSegment) {
           segment = await prisma.routeSegment.update({
             where: { id: existingSegment.id },
-            data: segData,
+            data: { ...segData, lastModifiedByDeviceId: deviceId || null },
           });
         } else {
           segment = await prisma.routeSegment.create({
@@ -202,6 +221,7 @@ export async function POST(request: NextRequest) {
               tripId,
               dayDate: segDayDate,
               branchId: effectiveBranchId,
+              lastModifiedByDeviceId: deviceId || null,
               ...segData,
             },
           });

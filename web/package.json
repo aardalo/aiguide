@@ -22,6 +22,7 @@
     "@types/leaflet": "^1.9.21",
     "leaflet": "^1.9.4",
     "leaflet.gridlayer.googlemutant": "^0.16.0",
+    "maplibre-gl": "^5.24.0",
     "neo4j-driver": "^6.0.1",
     "next": "16.1.6",
     "react": "19.2.3",

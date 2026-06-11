@@ -23,12 +23,14 @@ As a developer, I want comprehensive automated tests for trip creation, validati
 - [x] All tests pass consistently without flakiness.
 
 Notes on unmet criteria:
-- Fresh execution evidence in the current environment is still pending.
-- Coverage confirmation for current run is not yet recorded in backlog story state.
-- Consistent pass evidence should be re-captured before moving to complete.
+- No functional acceptance gaps remain for the currently implemented trip workflow scope.
+- Coverage percentage for this exact run was not recalculated, but targeted workflow suite execution evidence is captured below.
 
 ## Current implementation state
-Unit/integration/E2E test assets exist; story remains in-progress pending fresh execution evidence in current environment.
+Fresh execution evidence captured on 2026-06-08:
+- Targeted workflow suite passed: 7 files / 44 tests
+- Included trip edit timeline tests, branch anchor tests, route generation guard tests, and day-edit error handling tests
+- Database migration applied and runtime re-verified after schema update
 
 ## Dependencies
 - [STORY-002: Create trip with dates](STORY-002-create-trip-with-dates.md)

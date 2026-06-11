@@ -1,8 +1,8 @@
 # Tracking: EPIC-001 Web Map Trip Planning with Dates
 
 ## Status
-- Overall: ready (implementation partially delivered)
-- Sprint: Sprint 1 partially delivered; backlog reconciliation in progress
+- Overall: active (trip edit/timeline workflow delivered and verified)
+- Sprint: Sprint 1 implementation delivered for trip create, edit, validation, and daily-itinerary timeline flows
 
 ## Progress
 - Completed:
@@ -15,14 +15,16 @@
   - TASK-052: Tripadvisor nearby search (settings, API route, modal, context menu, markers, popup)
   - TASK-053: Foursquare nearby search (settings, API route with new Places API, modal, context menu, markers)
   - TASK-054: Status bar with message history (crossfade animation, history dropdown, detail popup)
+  - STORY-003A: Edit existing trip details via map-embedded edit flow, including derived start-date timeline shifting
+  - STORY-003B: Fresh execution evidence captured for trip workflow tests in current environment
+  - Trip timeline model implemented: start date is the anchor, stop date is derived, insert/remove-day shifts downstream dates
+  - Fork/branch anchor model implemented with guarded route generation and branch date validation
 - In progress:
   - STORY-002A: Display trip list and detail view (route-based pages pending)
-  - STORY-003A: Edit existing trip details (route-based edit page pending)
-  - STORY-003B: Automated tests for trip workflows (fresh execution evidence pending)
 - Next:
   - Implement dedicated route pages `/trips`, `/trips/:id`, `/trips/:id/edit`
-  - Re-run and record automated test execution evidence for current environment
-  - Promote in-progress stories to complete after route and test evidence closure
+  - Decide whether to retain map-embedded edit as the long-term UX or add route-based edit pages as a separate enhancement
+  - Review Prisma migration history cleanup (`20260608170605_add_branch_anchor_day_date`) before shipping
 
 ## Sprint 1 Stories
 1. [STORY-001A: Setup database infrastructure](../stories/STORY-001A-setup-database-infrastructure.md)
@@ -44,7 +46,7 @@
 
 ## Risks / blockers
 - Dedicated route-based trip pages are not yet implemented (`/trips`, `/trips/:id`, `/trips/:id/edit`)
-- Fresh automated test execution evidence is pending for STORY-003B completion
+- Prisma migration history contains an extra drift-reconciliation migration that is non-blocking but should be reviewed before shipping
 
 ## Decisions
 - Date-only scheduling fields (`YYYY-MM-DD`)
@@ -52,6 +54,9 @@
 - Node.js 22 + TypeScript + Next.js + Prisma + PostgreSQL for EPIC-001 delivery
 - Sprint 1 focuses on complete CRUD + validation for trip entities
 - Map interactions deferred to future sprints
+- Trip start date is the journey anchor; stop date is derived from timeline length
+- Single-day date edits affect only that day and return explicit 4xx errors on conflicts/range violations
+- Fork branches persist an anchor day and cannot schedule destinations or generate segments before that anchor
 
 ## Architecture updates (March 2, 2026)
 - **ARCH-005 created**: Graph database architecture for places and caching

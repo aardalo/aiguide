@@ -13,7 +13,7 @@ Run the dev server and confirm the compiled CSS contains the expected utility cl
 Run `npx prisma migrate dev --name <description>` (or `npx prisma generate` for schema-only changes), then **restart the dev server** so it picks up the regenerated Prisma client.
 
 ### Dev server management
-The project requires Node.js ≥20 (system node is v18 — too old). Always manage the dev server through the provided script, not `npm run dev` directly:
+The project requires Node.js 20+ and should run with a compatible Node runtime (prefer the managed project runtime). Always manage the dev server through the provided script, not `npm run dev` directly:
 
 ```bash
 scripts/dev-server.sh start    # start with correct Node.js version

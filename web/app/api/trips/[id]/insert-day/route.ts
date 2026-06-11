@@ -74,6 +74,11 @@ export async function POST(
       orderBy: { dayDate: 'desc' },
     });
 
+    const branchesToShift = await tx.branch.findMany({
+      where: { tripId: id, anchorDayDate: { gt: afterDateObj } },
+      orderBy: { anchorDayDate: 'desc' },
+    });
+
     // Shift destinations (backwards to avoid unique constraint clash)
     for (const dest of destsToShift) {
       const newDate = new Date(dest.dayDate);
@@ -101,6 +106,15 @@ export async function POST(
       await tx.routeSegment.update({
         where: { id: seg.id },
         data: { dayDate: newDate },
+      });
+    }
+
+    for (const branch of branchesToShift) {
+      const newDate = new Date(branch.anchorDayDate);
+      newDate.setUTCDate(newDate.getUTCDate() + 1);
+      await tx.branch.update({
+        where: { id: branch.id },
+        data: { anchorDayDate: newDate },
       });
     }
 

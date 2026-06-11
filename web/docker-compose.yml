@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   neo4j:
     image: neo4j:5-community
     container_name: trip_planner_neo4j
+    restart: unless-stopped
     environment:
       NEO4J_AUTH: neo4j/trip_planner_neo4j
       NEO4J_PLUGINS: '["apoc"]'
@@ -19,6 +18,7 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: trip_planner_db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: trip_user
       POSTGRES_PASSWORD: trip_password

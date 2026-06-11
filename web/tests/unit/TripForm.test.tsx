@@ -454,7 +454,7 @@ describe('TripForm Component', () => {
   });
 
   describe('Edit Mode', () => {
-    it('should prefill fields and submit PATCH to trip endpoint', async () => {
+    it('should prefill fields, derive end date from start change, and submit partial PATCH', async () => {
       const updatedTrip = {
         id: 'trip-123',
         title: 'Updated Trip',
@@ -486,6 +486,7 @@ describe('TripForm Component', () => {
       expect((screen.getByLabelText(/trip title/i) as HTMLInputElement).value).toBe('Summer Road Trip 2026');
       expect((screen.getByLabelText(/start date/i) as HTMLInputElement).value).toBe('2026-06-01');
       expect((screen.getByLabelText(/end date/i) as HTMLInputElement).value).toBe('2026-06-15');
+      expect(screen.getByLabelText(/end date/i)).toBeDisabled();
 
       fireEvent.change(screen.getByLabelText(/trip title/i), {
         target: { value: 'Updated Trip' },
@@ -496,8 +497,9 @@ describe('TripForm Component', () => {
       fireEvent.change(screen.getByLabelText(/start date/i), {
         target: { value: '2026-06-02' },
       });
-      fireEvent.change(screen.getByLabelText(/end date/i), {
-        target: { value: '2026-06-16' },
+
+      await waitFor(() => {
+        expect((screen.getByLabelText(/end date/i) as HTMLInputElement).value).toBe('2026-06-16');
       });
 
       fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
@@ -512,7 +514,44 @@ describe('TripForm Component', () => {
             title: 'Updated Trip',
             description: 'Updated description',
             startDate: '2026-06-02',
-            stopDate: '2026-06-16',
+          }),
+        });
+      });
+    });
+
+    it('should send only changed field in edit mode', async () => {
+      (global.fetch as any).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ id: 'trip-123', title: 'Renamed Trip' }),
+      });
+
+      render(
+        <TripForm
+          mode="edit"
+          tripId="trip-123"
+          initialData={{
+            title: 'Summer Road Trip 2026',
+            description: 'Original description',
+            startDate: '2026-06-01',
+            stopDate: '2026-06-15',
+          }}
+        />
+      );
+
+      fireEvent.change(screen.getByLabelText(/trip title/i), {
+        target: { value: 'Renamed Trip' },
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+      await waitFor(() => {
+        expect(global.fetch).toHaveBeenCalledWith('/api/trips/trip-123', {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            title: 'Renamed Trip',
           }),
         });
       });

@@ -14,6 +14,10 @@ export interface StatusBarHandle {
   /** Show a persistent animated loading message. Cleared by pushStatus or clearLoading. */
   setLoading: (text: string) => void;
   clearLoading: () => void;
+  /** Show a message in the lower-right toast popup. New calls replace the current content. */
+  showToast: (text: string) => void;
+  /** Close the lower-right toast popup. */
+  clearToast: () => void;
 }
 
 const DEFAULT_SUBTITLE = 'Plan your road trip with dates and destinations';
@@ -29,6 +33,7 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [detailMsg, setDetailMsg] = useState<StatusMessage | null>(null);
+  const [toastText, setToastText] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const fadeRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const elapsedRef = useRef<ReturnType<typeof setInterval>>(undefined);
@@ -85,7 +90,15 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
     }, 1000);
   }, [clearTimers, stopElapsedTimer]);
 
-  useImperativeHandle(ref, () => ({ pushStatus, setLoading, clearLoading }), [pushStatus, setLoading, clearLoading]);
+  const showToast = useCallback((text: string) => {
+    setToastText(text);
+  }, []);
+
+  const clearToast = useCallback(() => {
+    setToastText(null);
+  }, []);
+
+  useImperativeHandle(ref, () => ({ pushStatus, setLoading, clearLoading, showToast, clearToast }), [pushStatus, setLoading, clearLoading, showToast, clearToast]);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -218,6 +231,23 @@ const StatusBar = forwardRef<StatusBarHandle>(function StatusBar(_, ref) {
                 {detailMsg.detail}
               </pre>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Lower-right toast popup for AI search progress */}
+      {toastText && (
+        <div className="fixed bottom-4 right-4 z-[900] max-w-sm w-80 bg-white border border-neutral-200 rounded-lg shadow-xl">
+          <div className="flex items-start gap-2 p-3">
+            <p className="text-sm text-neutral-800 flex-1 whitespace-pre-line">{toastText}</p>
+            <button
+              type="button"
+              onClick={() => setToastText(null)}
+              className="text-neutral-400 hover:text-neutral-600 text-lg leading-none shrink-0 -mt-0.5"
+              aria-label="Close"
+            >
+              &times;
+            </button>
           </div>
         </div>
       )}

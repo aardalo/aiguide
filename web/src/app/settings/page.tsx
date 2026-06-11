@@ -13,6 +13,7 @@ import RoutingProviderForm from './components/RoutingProviderForm';
 import TripadvisorSettingsForm from './components/TripadvisorSettingsForm';
 import FoursquareSettingsForm from './components/FoursquareSettingsForm';
 import AiProviderForm from './components/AiProviderForm';
+import DevicesForm from './components/DevicesForm';
 
 export default function SettingsPage() {
   return (
@@ -71,6 +72,13 @@ export default function SettingsPage() {
             Choose the AI provider for route experience discovery (Michelin-style recommendations).
           </p>
           <AiProviderForm />
+        </section>
+        <section>
+          <h2 className="text-lg font-semibold text-neutral-900 mb-1">Devices</h2>
+          <p className="text-sm text-neutral-600 mb-4">
+            Devices that sync trip changes across browsers. Rename them to recognize where edits come from, or remove ones you no longer use.
+          </p>
+          <DevicesForm />
         </section>
       </main>
     </div>

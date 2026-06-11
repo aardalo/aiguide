@@ -43,7 +43,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { tripId, dayDate, name, latitude, longitude, notes, category } = validation.data;
+  const { tripId, dayDate, name, latitude, longitude, notes, category, deviceId } = validation.data;
 
   try {
     const poi = await prisma.dailyPoi.create({
@@ -55,6 +55,12 @@ export async function POST(request: NextRequest) {
         longitude,
         notes: notes ?? null,
         category,
+        lastModifiedByDeviceId: deviceId || null,
+      },
+      include: {
+        lastModifiedByDevice: {
+          select: { id: true, name: true },
+        },
       },
     });
     return NextResponse.json(poi, { status: 201 });
