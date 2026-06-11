@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { branchUpdateSchema } from '@/lib/schemas/trip';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 /**
  * PATCH /api/branches/[id]
@@ -27,6 +28,9 @@ export async function PATCH(
       return NextResponse.json({ error: 'Branch not found' }, { status: 404 });
     }
 
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, existing.tripId, 'edit');
+
     const updated = await prisma.branch.update({
       where: { id },
       data: validation.data,
@@ -34,6 +38,8 @@ export async function PATCH(
 
     return NextResponse.json(updated);
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error('[PATCH /api/branches/[id]] Error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
@@ -55,10 +61,15 @@ export async function DELETE(
       return NextResponse.json({ error: 'Branch not found' }, { status: 404 });
     }
 
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, existing.tripId, 'edit');
+
     await prisma.branch.delete({ where: { id } });
 
     return NextResponse.json({ success: true });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error('[DELETE /api/branches/[id]] Error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

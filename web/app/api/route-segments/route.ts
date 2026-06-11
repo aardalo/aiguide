@@ -13,6 +13,7 @@ import { getActiveRoutingProvider } from '@/lib/routing';
 import { generateDistanceWaypoints } from '@/lib/routing/waypoints';
 import { getSetting, SETTING_KEYS } from '@/lib/settings';
 import { routeSegmentGenerateSchema } from '@/lib/schemas/routing';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 /** GET /api/route-segments?tripId=xxx */
 export async function GET(request: NextRequest) {
@@ -25,6 +26,9 @@ export async function GET(request: NextRequest) {
   }
 
   try {
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'view');
+
     const segments = await prisma.routeSegment.findMany({
       where: { tripId },
       orderBy: { dayDate: 'asc' },
@@ -32,6 +36,8 @@ export async function GET(request: NextRequest) {
     });
     return NextResponse.json(segments);
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[GET /api/route-segments] Error:', err);
     return NextResponse.json({ error: 'Failed to load route segments' }, { status: 500 });
   }
@@ -50,6 +56,9 @@ export async function POST(request: NextRequest) {
     }
 
     const { tripId, branchId } = validation.data;
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'edit');
     const deviceId = (body as Record<string, unknown>).deviceId as string | undefined;
     const effectiveBranchId = branchId ?? null;
 
@@ -278,6 +287,8 @@ export async function POST(request: NextRequest) {
       { status: errors.length > 0 ? 207 : 200 },
     );
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[POST /api/route-segments] Error:', err);
     return NextResponse.json({ error: 'Failed to generate route segments' }, { status: 500 });
   }

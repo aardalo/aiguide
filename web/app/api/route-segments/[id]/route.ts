@@ -13,6 +13,7 @@ import { prisma } from '@/lib/prisma';
 import { getActiveRoutingProvider } from '@/lib/routing';
 import { generateDistanceWaypoints } from '@/lib/routing/waypoints';
 import { getSetting, SETTING_KEYS } from '@/lib/settings';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 const patchBodySchema = z.object({
   latitude: z.number(),
@@ -46,6 +47,9 @@ export async function PATCH(
     if (!segment) {
       return NextResponse.json({ error: 'Segment not found' }, { status: 404 });
     }
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, segment.tripId, 'edit');
 
     // Resolve from-coordinates (home or DailyDestination)
     let fromCoords: { latitude: number; longitude: number } | null = null;
@@ -185,6 +189,8 @@ export async function PATCH(
 
     return NextResponse.json(updatedSegment);
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[PATCH /api/route-segments/:id] Error:', err);
     return NextResponse.json({ error: 'Failed to insert via-point' }, { status: 500 });
   }

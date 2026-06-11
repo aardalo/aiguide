@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { branchCreateSchema } from '@/lib/schemas/trip';
 import { nextBranchColor } from '@/lib/branches';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 /**
  * GET /api/branches?tripId=xxx
@@ -14,6 +15,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'tripId query parameter is required' }, { status: 400 });
     }
 
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'view');
+
     const branches = await prisma.branch.findMany({
       where: { tripId },
       orderBy: { sortOrder: 'asc' },
@@ -21,6 +25,8 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(branches);
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error('[GET /api/branches] Error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
@@ -43,6 +49,9 @@ export async function POST(request: NextRequest) {
     }
 
     const { tripId, dayDate, name } = validation.data;
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, tripId, 'edit');
 
     // Verify trip exists
     const trip = await prisma.trip.findUnique({ where: { id: tripId } });
@@ -87,6 +96,8 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(branch, { status: 201 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error('[POST /api/branches] Error:', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }

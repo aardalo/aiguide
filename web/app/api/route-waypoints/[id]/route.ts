@@ -27,6 +27,7 @@ import { prisma } from '@/lib/prisma';
 import { getActiveRoutingProvider } from '@/lib/routing';
 import { generateDistanceWaypoints } from '@/lib/routing/waypoints';
 import { getSetting, SETTING_KEYS } from '@/lib/settings';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 const patchBodySchema = z.object({
   latitude: z.number(),
@@ -59,6 +60,9 @@ export async function DELETE(
     if (!waypoint) {
       return NextResponse.json({ error: 'Waypoint not found' }, { status: 404 });
     }
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, waypoint.segment.tripId, 'edit');
 
     const segment = waypoint.segment;
 
@@ -178,6 +182,8 @@ export async function DELETE(
 
     return NextResponse.json(updatedSegment);
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[DELETE /api/route-waypoints/:id] Error:', err);
     return NextResponse.json({ error: 'Failed to delete waypoint' }, { status: 500 });
   }
@@ -214,6 +220,9 @@ export async function PATCH(
     if (!waypoint) {
       return NextResponse.json({ error: 'Waypoint not found' }, { status: 404 });
     }
+
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, waypoint.segment.tripId, 'edit');
 
     const segment = waypoint.segment;
 
@@ -354,6 +363,8 @@ export async function PATCH(
 
     return NextResponse.json(updatedSegment);
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[PATCH /api/route-waypoints/:id] Error:', err);
     return NextResponse.json({ error: 'Failed to update waypoint' }, { status: 500 });
   }

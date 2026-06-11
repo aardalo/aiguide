@@ -40,6 +40,12 @@ vi.mock('@/lib/settings', () => ({
 vi.mock('@/lib/routing', () => ({
   getActiveRoutingProvider: mockGetActiveRoutingProvider,
 }));
+vi.mock('@/lib/auth/access', () => ({
+  getSessionUser: vi.fn(async () => ({ id: 'test-user' })),
+  assertTripAccess: vi.fn(async () => {}),
+  accessErrorResponse: vi.fn(() => null),
+  AccessError: class AccessError extends Error { constructor(public status: number, m: string){ super(m); } },
+}));
 
 import { POST } from '../../app/api/route-segments/route';
 
