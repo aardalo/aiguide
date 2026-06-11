@@ -17,6 +17,12 @@ import {
   cleanupMarkedTrips,
   markTripPayloadForCleanupWithScope,
 } from './helpers/testTrips';
+import { registerUser, loginViaUI, loginViaAPIContext } from './helpers/auth';
+
+const TEST_PASSWORD = 'e2e-password-123';
+// Each describe block uses its own account so parallel workers don't conflict.
+const SYNC_EMAIL = 'cross-device-sync-api@e2e.test';
+const INDICATOR_EMAIL = 'cross-device-sync-ui@e2e.test';
 
 const CLEANUP_SCOPE = 'cross-device-sync-e2e';
 
@@ -49,11 +55,14 @@ async function createTrip(request: APIRequestContext) {
 test.describe('Cross-device synchronization', () => {
   test.describe.configure({ mode: 'serial' });
 
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ request, baseURL }) => {
+    await registerUser(baseURL!, SYNC_EMAIL, TEST_PASSWORD);
+    await loginViaAPIContext(request, SYNC_EMAIL, TEST_PASSWORD);
     await cleanupMarkedTrips(request, CLEANUP_SCOPE);
   });
 
   test.afterEach(async ({ request }) => {
+    await loginViaAPIContext(request, SYNC_EMAIL, TEST_PASSWORD);
     await cleanupMarkedTrips(request, CLEANUP_SCOPE);
   });
 
@@ -150,11 +159,16 @@ test.describe('Cross-device synchronization', () => {
 test.describe('Sync status indicator', () => {
   test.describe.configure({ mode: 'serial' });
 
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ page, request, baseURL }) => {
+    await registerUser(baseURL!, INDICATOR_EMAIL, TEST_PASSWORD);
+    await loginViaAPIContext(request, INDICATOR_EMAIL, TEST_PASSWORD);
     await cleanupMarkedTrips(request, CLEANUP_SCOPE);
+    await loginViaUI(page, INDICATOR_EMAIL, TEST_PASSWORD);
+    await page.evaluate(() => localStorage.clear());
   });
 
   test.afterEach(async ({ request }) => {
+    await loginViaAPIContext(request, INDICATOR_EMAIL, TEST_PASSWORD);
     await cleanupMarkedTrips(request, CLEANUP_SCOPE);
   });
 

@@ -10,6 +10,10 @@ import {
   cleanupMarkedTrips,
   markTripPayloadForCleanupWithScope,
 } from './helpers/testTrips';
+import { registerUser, loginViaAPIContext } from './helpers/auth';
+
+const TEST_EMAIL = 'trip-export-import-e2e@e2e.test';
+const TEST_PASSWORD = 'e2e-password-123';
 
 const CLEANUP_SCOPE = 'trip-export-import-e2e';
 
@@ -45,11 +49,14 @@ async function addDestination(request: any, tripId: string, dayDate: string, nam
 test.describe('Trip export/import', () => {
   test.describe.configure({ mode: 'serial' });
 
-  test.beforeEach(async ({ request }) => {
+  test.beforeEach(async ({ request, baseURL }) => {
+    await registerUser(baseURL!, TEST_EMAIL, TEST_PASSWORD);
+    await loginViaAPIContext(request, TEST_EMAIL, TEST_PASSWORD);
     await cleanupMarkedTrips(request, CLEANUP_SCOPE);
   });
 
   test.afterEach(async ({ request }) => {
+    await loginViaAPIContext(request, TEST_EMAIL, TEST_PASSWORD);
     await cleanupMarkedTrips(request, CLEANUP_SCOPE);
   });
 

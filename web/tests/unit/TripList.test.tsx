@@ -8,11 +8,16 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import TripList from '@/app/map/components/TripList';
 import type { TripResponse } from '@/lib/schemas/trip';
 
+// Mock next-auth/react so TripList doesn't require a SessionProvider
+vi.mock('next-auth/react', () => ({
+  useSession: vi.fn(() => ({ data: { user: { id: 'test-user' } }, status: 'authenticated' })),
+}));
+
 // Mock fetch globally
 const mockFetch = vi.fn();
 global.fetch = mockFetch as any;
 
-const mockTrips: TripResponse[] = [
+const mockTrips = [
   {
     id: 'trip1',
     title: 'Summer Road Trip',
@@ -22,6 +27,8 @@ const mockTrips: TripResponse[] = [
     stopDate: '2026-06-15',
     createdAt: '2026-03-01T10:00:00Z',
     updatedAt: '2026-03-01T10:00:00Z',
+    ownerId: 'test-user',
+    shares: [],
   },
   {
     id: 'trip2',
@@ -32,8 +39,10 @@ const mockTrips: TripResponse[] = [
     stopDate: '2026-04-12',
     createdAt: '2026-03-02T14:30:00Z',
     updatedAt: '2026-03-02T14:30:00Z',
+    ownerId: 'test-user',
+    shares: [],
   },
-];
+] satisfies (TripResponse & { ownerId: string; shares: unknown[] })[];
 
 describe('TripList Component', () => {
   beforeEach(() => {

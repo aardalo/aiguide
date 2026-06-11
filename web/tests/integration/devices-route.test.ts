@@ -15,6 +15,7 @@ const { mockPrisma } = vi.hoisted(() => {
 });
 
 vi.mock('@/lib/prisma', () => ({ prisma: mockPrisma }));
+vi.mock('@/../auth', () => ({ auth: vi.fn(async () => null) }));
 
 // Re-export the Prisma error class used by the [id] route for not-found handling
 vi.mock('@prisma/client', () => {

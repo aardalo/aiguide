@@ -220,9 +220,11 @@ export default function TripForm({
         setFormData({ ...emptyFormData });
       }
 
-      // Call success callback
+      // Call success callback after a brief delay so the success message
+      // renders for at least one frame before the parent unmounts the form.
       if (onSuccess) {
-        onSuccess(data as TripResponse);
+        const captured = data as TripResponse;
+        setTimeout(() => onSuccess(captured), 500);
       }
 
       // Auto-hide success message after 3 seconds
