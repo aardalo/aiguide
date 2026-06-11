@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { tripCreateSchema } from "@/lib/schemas/trip";
+import { getSessionUser } from "@/lib/auth/access";
 
 /**
  * POST /api/trips
@@ -34,6 +35,8 @@ export async function POST(request: NextRequest) {
 
     const data = validation.data;
 
+    const { id: userId } = await getSessionUser();
+
     // Create trip in database
     const trip = await prisma.trip.create({
       data: {
@@ -43,6 +46,7 @@ export async function POST(request: NextRequest) {
         startDate: new Date(data.startDate),
         stopDate: new Date(data.stopDate),
         routingPreferences: data.routingPreferences ? JSON.stringify(data.routingPreferences) : null,
+        ownerId: userId,
       },
     });
 
@@ -66,7 +70,9 @@ export async function POST(request: NextRequest) {
  */
 export async function GET(request: NextRequest) {
   try {
+    const { id: userId } = await getSessionUser();
     const trips = await prisma.trip.findMany({
+      where: { OR: [{ ownerId: userId }, { shares: { some: { userId } } }] },
       orderBy: { createdAt: "desc" },
     });
 

@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { tripUpdateSchema } from "@/lib/schemas/trip";
+import { getSessionUser, assertTripAccess, accessErrorResponse } from "@/lib/auth/access";
 import {
   ALLOW_TRIP_DELETE_ENV,
   ALLOW_TRIP_DELETE_HEADER,
@@ -44,6 +45,8 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, id, 'view');
 
     const trip = await prisma.trip.findUnique({
       where: { id },
@@ -62,6 +65,8 @@ export async function GET(
     };
     return NextResponse.json(parsed, { status: 200 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[GET /api/trips/[id]] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -80,6 +85,8 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, id, 'edit');
     const body = await request.json();
 
     // Validate request payload
@@ -222,6 +229,8 @@ export async function PATCH(
     };
     return NextResponse.json(parsed, { status: 200 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[PATCH /api/trips/[id]] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
@@ -240,6 +249,8 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
+    const { id: userId } = await getSessionUser();
+    await assertTripAccess(userId, id, 'edit');
 
     // Check if trip exists
     const existingTrip = await prisma.trip.findUnique({
@@ -279,6 +290,8 @@ export async function DELETE(
 
     return NextResponse.json(deletedTrip, { status: 200 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[DELETE /api/trips/[id]] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },

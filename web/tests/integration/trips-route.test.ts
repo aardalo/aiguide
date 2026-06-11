@@ -5,6 +5,8 @@ const { mockPrisma } = vi.hoisted(() => {
     mockPrisma: {
       trip: {
         findUnique: vi.fn(),
+        findMany: vi.fn(),
+        create: vi.fn(),
         update: vi.fn(),
       },
       dailyDestination: {
@@ -30,12 +32,17 @@ const { mockPrisma } = vi.hoisted(() => {
 
 vi.mock('@/lib/prisma', () => ({ prisma: mockPrisma }));
 
+vi.mock('@/lib/auth/access', () => ({
+  getSessionUser: vi.fn(async () => ({ id: 'me' })),
+  assertTripAccess: vi.fn(async () => {}),
+  accessErrorResponse: vi.fn(() => null),
+}));
+
 import { PATCH } from '../../app/api/trips/[id]/route';
+import { GET, POST } from '../../app/api/trips/route';
 
 describe('PATCH /api/trips/[id]', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
+  beforeEach(() => { vi.clearAllMocks(); });
 
   it('shifts dated records and stopDate when startDate changes', async () => {
     const existingTrip = {
@@ -157,5 +164,62 @@ describe('PATCH /api/trips/[id]', () => {
     expect(json.error).toContain('Stop date is derived from the journey timeline');
     expect(mockPrisma.$transaction).not.toHaveBeenCalled();
     expect(mockPrisma.trip.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET/POST /api/trips ownership', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('GET /api/trips scopes to owner-or-shared trips', async () => {
+    mockPrisma.trip.findMany.mockResolvedValue([]);
+
+    const request = new Request('http://localhost:3000/api/trips', {
+      method: 'GET',
+    });
+
+    const response = await GET(request as any);
+    expect(response.status).toBe(200);
+
+    expect(mockPrisma.trip.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { OR: [{ ownerId: 'me' }, { shares: { some: { userId: 'me' } } }] },
+        orderBy: { createdAt: 'desc' },
+      })
+    );
+  });
+
+  it('POST /api/trips stamps ownerId from session', async () => {
+    const now = new Date();
+    mockPrisma.trip.create.mockResolvedValue({
+      id: 'new-trip',
+      title: 'My Trip',
+      description: null,
+      planMode: false,
+      startDate: new Date('2026-09-01T00:00:00.000Z'),
+      stopDate: new Date('2026-09-05T00:00:00.000Z'),
+      routingPreferences: null,
+      ownerId: 'me',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const request = new Request('http://localhost:3000/api/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'My Trip',
+        startDate: '2026-09-01',
+        stopDate: '2026-09-05',
+      }),
+    });
+
+    const response = await POST(request as any);
+    expect(response.status).toBe(201);
+
+    expect(mockPrisma.trip.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ ownerId: 'me' }),
+      })
+    );
   });
 });

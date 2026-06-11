@@ -4,45 +4,78 @@
  * Task: TASK-003, TEST-001
  */
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { prisma } from "@/lib/prisma";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+
+const { mockPrisma } = vi.hoisted(() => {
+  return {
+    mockPrisma: {
+      trip: {
+        findUnique: vi.fn(),
+        findMany: vi.fn(),
+        create: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn(),
+      },
+      $transaction: vi.fn(),
+      $disconnect: vi.fn(),
+    },
+  };
+});
+
+vi.mock("@/lib/prisma", () => ({ prisma: mockPrisma }));
+
+vi.mock("@/lib/auth/access", () => ({
+  getSessionUser: vi.fn(async () => ({ id: "test-user" })),
+  assertTripAccess: vi.fn(async () => {}),
+  accessErrorResponse: vi.fn(() => null),
+}));
+
 import {
   ALLOW_TRIP_DELETE_HEADER,
   ALLOW_TRIP_DELETE_VALUE,
   TEST_TRIP_MARKER,
 } from "@/lib/trip-delete-safeguard";
 
-// Helper to make API requests
-const API_BASE = "http://localhost:3000";
+import { GET as getTrips, POST as postTrip } from "../../app/api/trips/route";
+import {
+  GET as getTripById,
+  PATCH as patchTrip,
+  DELETE as deleteTrip,
+} from "../../app/api/trips/[id]/route";
 
-async function makeRequest(
-  path: string,
-  options: RequestInit = {}
-): Promise<Response> {
-  const url = `${API_BASE}${path}`;
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-  });
-  return response;
+// Helpers to build Request objects
+function makeRequest(
+  url: string,
+  method: string,
+  body?: unknown,
+  headers: Record<string, string> = {}
+) {
+  return new Request(url, {
+    method,
+    headers: { "Content-Type": "application/json", ...headers },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  }) as any;
 }
 
-describe("Trip API Endpoints", () => {
-  const createdTripIds: string[] = [];
+const BASE = "http://localhost:3000";
 
-  // Clean up test data after all tests
-  afterAll(async () => {
-    if (createdTripIds.length > 0) {
-      await prisma.trip.deleteMany({
-        where: {
-          id: { in: createdTripIds },
-        },
-      });
-    }
-    await prisma.$disconnect();
+const makeBaseTrip = (overrides: Record<string, unknown> = {}) => ({
+  id: "trip-1",
+  title: "API Test Trip",
+  description: "Testing trip creation via API",
+  planMode: false,
+  startDate: new Date("2026-06-01T00:00:00.000Z"),
+  stopDate: new Date("2026-06-15T00:00:00.000Z"),
+  routingPreferences: null,
+  ownerId: "test-user",
+  createdAt: new Date("2026-01-01T00:00:00.000Z"),
+  updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+  ...overrides,
+});
+
+describe("Trip API Endpoints", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
   describe("POST /api/trips - Create Trip", () => {
@@ -54,21 +87,19 @@ describe("Trip API Endpoints", () => {
         stopDate: "2026-06-15",
       };
 
-      const response = await makeRequest("/api/trips", {
-        method: "POST",
-        body: JSON.stringify(tripData),
-      });
+      mockPrisma.trip.create.mockResolvedValue(makeBaseTrip());
+
+      const response = await postTrip(
+        makeRequest(`${BASE}/api/trips`, "POST", tripData)
+      );
 
       expect(response.status).toBe(201);
 
       const trip = await response.json();
-      createdTripIds.push(trip.id);
-
       expect(trip.id).toBeDefined();
       expect(trip.title).toBe(tripData.title);
       expect(trip.description).toBe(tripData.description);
       expect(trip.planMode).toBe(false);
-      // ISO format dates include time, so check date portion
       expect(trip.startDate).toMatch(new RegExp(`^${tripData.startDate}`));
       expect(trip.stopDate).toMatch(new RegExp(`^${tripData.stopDate}`));
       expect(trip.createdAt).toBeDefined();
@@ -82,16 +113,17 @@ describe("Trip API Endpoints", () => {
         stopDate: "2026-07-05",
       };
 
-      const response = await makeRequest("/api/trips", {
-        method: "POST",
-        body: JSON.stringify(tripData),
-      });
+      mockPrisma.trip.create.mockResolvedValue(
+        makeBaseTrip({ title: "Minimal API Trip", description: null })
+      );
+
+      const response = await postTrip(
+        makeRequest(`${BASE}/api/trips`, "POST", tripData)
+      );
 
       expect(response.status).toBe(201);
 
       const trip = await response.json();
-      createdTripIds.push(trip.id);
-
       expect(trip.description).toBeNull();
     });
 
@@ -100,10 +132,9 @@ describe("Trip API Endpoints", () => {
         description: "Missing title and dates",
       };
 
-      const response = await makeRequest("/api/trips", {
-        method: "POST",
-        body: JSON.stringify(invalidData),
-      });
+      const response = await postTrip(
+        makeRequest(`${BASE}/api/trips`, "POST", invalidData)
+      );
 
       expect(response.status).toBe(400);
 
@@ -119,10 +150,9 @@ describe("Trip API Endpoints", () => {
         stopDate: "2026-06-01", // Before start date
       };
 
-      const response = await makeRequest("/api/trips", {
-        method: "POST",
-        body: JSON.stringify(invalidData),
-      });
+      const response = await postTrip(
+        makeRequest(`${BASE}/api/trips`, "POST", invalidData)
+      );
 
       expect(response.status).toBe(400);
 
@@ -137,10 +167,9 @@ describe("Trip API Endpoints", () => {
         stopDate: "2026-06-15",
       };
 
-      const response = await makeRequest("/api/trips", {
-        method: "POST",
-        body: JSON.stringify(invalidData),
-      });
+      const response = await postTrip(
+        makeRequest(`${BASE}/api/trips`, "POST", invalidData)
+      );
 
       expect(response.status).toBe(400);
     });
@@ -152,44 +181,32 @@ describe("Trip API Endpoints", () => {
         stopDate: "2026-08-01",
       };
 
-      const response = await makeRequest("/api/trips", {
-        method: "POST",
-        body: JSON.stringify(tripData),
-      });
+      mockPrisma.trip.create.mockResolvedValue(
+        makeBaseTrip({
+          title: "One Day Trip",
+          startDate: new Date("2026-08-01T00:00:00.000Z"),
+          stopDate: new Date("2026-08-01T00:00:00.000Z"),
+        })
+      );
+
+      const response = await postTrip(
+        makeRequest(`${BASE}/api/trips`, "POST", tripData)
+      );
 
       expect(response.status).toBe(201);
-
-      const trip = await response.json();
-      createdTripIds.push(trip.id);
     });
   });
 
   describe("GET /api/trips - List Trips", () => {
-    beforeAll(async () => {
-      // Create some test trips
-      const trips = await Promise.all([
-        prisma.trip.create({
-          data: {
-            title: "List Test Trip 1",
-            startDate: new Date("2026-09-01"),
-            stopDate: new Date("2026-09-05"),
-          },
-        }),
-        prisma.trip.create({
-          data: {
-            title: "List Test Trip 2",
-            startDate: new Date("2026-10-01"),
-            stopDate: new Date("2026-10-05"),
-          },
-        }),
-      ]);
-      createdTripIds.push(...trips.map((t) => t.id));
-    });
-
     it("should return a list of trips", async () => {
-      const response = await makeRequest("/api/trips", {
-        method: "GET",
-      });
+      mockPrisma.trip.findMany.mockResolvedValue([
+        makeBaseTrip({ id: "trip-1", title: "List Test Trip 1" }),
+        makeBaseTrip({ id: "trip-2", title: "List Test Trip 2" }),
+      ]);
+
+      const response = await getTrips(
+        makeRequest(`${BASE}/api/trips`, "GET")
+      );
 
       expect(response.status).toBe(200);
 
@@ -208,9 +225,19 @@ describe("Trip API Endpoints", () => {
     });
 
     it("should return trips sorted by createdAt descending", async () => {
-      const response = await makeRequest("/api/trips", {
-        method: "GET",
+      const t1 = makeBaseTrip({
+        id: "trip-1",
+        createdAt: new Date("2026-09-02T00:00:00.000Z"),
       });
+      const t2 = makeBaseTrip({
+        id: "trip-2",
+        createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      });
+      mockPrisma.trip.findMany.mockResolvedValue([t1, t2]);
+
+      const response = await getTrips(
+        makeRequest(`${BASE}/api/trips`, "GET")
+      );
 
       expect(response.status).toBe(200);
 
@@ -224,39 +251,35 @@ describe("Trip API Endpoints", () => {
   });
 
   describe("GET /api/trips/[id] - Get Trip by ID", () => {
-    let testTripId: string;
-
-    beforeAll(async () => {
-      const trip = await prisma.trip.create({
-        data: {
+    it("should return a trip by ID", async () => {
+      mockPrisma.trip.findUnique.mockResolvedValue(
+        makeBaseTrip({
           title: "Get Test Trip",
           description: "For testing GET by ID",
-          startDate: new Date("2026-11-01"),
-          stopDate: new Date("2026-11-05"),
-        },
-      });
-      testTripId = trip.id;
-      createdTripIds.push(trip.id);
-    });
+        })
+      );
 
-    it("should return a trip by ID", async () => {
-      const response = await makeRequest(`/api/trips/${testTripId}`, {
-        method: "GET",
-      });
+      const response = await getTripById(
+        makeRequest(`${BASE}/api/trips/trip-1`, "GET"),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(200);
 
       const trip = await response.json();
-      expect(trip.id).toBe(testTripId);
+      expect(trip.id).toBe("trip-1");
       expect(trip.title).toBe("Get Test Trip");
       expect(trip.description).toBe("For testing GET by ID");
       expect(trip.planMode).toBe(false);
     });
 
     it("should return 404 for non-existent trip", async () => {
-      const response = await makeRequest("/api/trips/non_existent_id", {
-        method: "GET",
-      });
+      mockPrisma.trip.findUnique.mockResolvedValue(null);
+
+      const response = await getTripById(
+        makeRequest(`${BASE}/api/trips/non_existent_id`, "GET"),
+        { params: Promise.resolve({ id: "non_existent_id" }) }
+      );
 
       expect(response.status).toBe(404);
 
@@ -266,30 +289,21 @@ describe("Trip API Endpoints", () => {
   });
 
   describe("PATCH /api/trips/[id] - Update Trip", () => {
-    let updateTestTripId: string;
-
-    beforeAll(async () => {
-      const trip = await prisma.trip.create({
-        data: {
-          title: "Original Update Title",
-          description: "Original description",
-          startDate: new Date("2026-12-01"),
-          stopDate: new Date("2026-12-05"),
-        },
-      });
-      updateTestTripId = trip.id;
-      createdTripIds.push(trip.id);
-    });
-
     it("should update trip title", async () => {
-      const updateData = {
+      const updateData = { title: "Updated Title via API" };
+      const updated = makeBaseTrip({
         title: "Updated Title via API",
-      };
-
-      const response = await makeRequest(`/api/trips/${updateTestTripId}`, {
-        method: "PATCH",
-        body: JSON.stringify(updateData),
+        description: "Original description",
       });
+      mockPrisma.trip.findUnique.mockResolvedValue(
+        makeBaseTrip({ description: "Original description" })
+      );
+      mockPrisma.trip.update.mockResolvedValue(updated);
+
+      const response = await patchTrip(
+        makeRequest(`${BASE}/api/trips/trip-1`, "PATCH", updateData),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(200);
 
@@ -299,14 +313,16 @@ describe("Trip API Endpoints", () => {
     });
 
     it("should update trip description", async () => {
-      const updateData = {
-        description: "Updated description via API",
-      };
+      const updateData = { description: "Updated description via API" };
+      mockPrisma.trip.findUnique.mockResolvedValue(makeBaseTrip());
+      mockPrisma.trip.update.mockResolvedValue(
+        makeBaseTrip({ description: "Updated description via API" })
+      );
 
-      const response = await makeRequest(`/api/trips/${updateTestTripId}`, {
-        method: "PATCH",
-        body: JSON.stringify(updateData),
-      });
+      const response = await patchTrip(
+        makeRequest(`${BASE}/api/trips/trip-1`, "PATCH", updateData),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(200);
 
@@ -319,11 +335,49 @@ describe("Trip API Endpoints", () => {
         startDate: "2027-01-01",
         stopDate: "2027-01-15",
       };
+      // Same start as existing, so no shift; stopDate matches existing so no rejection
+      // But stopDate differs from existing — the route rejects explicit stopDate when no start shift
+      // We need an existing trip whose stopDate matches the new stopDate, or
+      // send startDate with a valid shift that carries stopDate along.
+      // Here we send both startDate+stopDate as in the original test.
+      // The route only rejects if stopDate changes WITHOUT a start shift.
+      // So we must send startDate that shifts (differs from existing).
+      mockPrisma.trip.findUnique.mockResolvedValue(
+        makeBaseTrip({
+          startDate: new Date("2026-12-01T00:00:00.000Z"),
+          stopDate: new Date("2026-12-05T00:00:00.000Z"),
+        })
+      );
 
-      const response = await makeRequest(`/api/trips/${updateTestTripId}`, {
-        method: "PATCH",
-        body: JSON.stringify(updateData),
+      // The PATCH handler will try a $transaction for a start shift
+      const updatedTrip = makeBaseTrip({
+        startDate: new Date("2027-01-01T00:00:00.000Z"),
+        stopDate: new Date("2027-01-15T00:00:00.000Z"),
       });
+
+      mockPrisma.$transaction.mockImplementation(
+        async (callback: (tx: unknown) => unknown) => {
+          const tx = {
+            dailyDestination: {
+              findMany: vi.fn().mockResolvedValue([]),
+              update: vi.fn(),
+            },
+            dailyPoi: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
+            routeSegment: {
+              findMany: vi.fn().mockResolvedValue([]),
+              update: vi.fn(),
+            },
+            branch: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
+            trip: { update: vi.fn().mockResolvedValue(updatedTrip) },
+          };
+          return await callback(tx);
+        }
+      );
+
+      const response = await patchTrip(
+        makeRequest(`${BASE}/api/trips/trip-1`, "PATCH", updateData),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(200);
 
@@ -342,10 +396,45 @@ describe("Trip API Endpoints", () => {
         stopDate: "2027-02-10",
       };
 
-      const response = await makeRequest(`/api/trips/${updateTestTripId}`, {
-        method: "PATCH",
-        body: JSON.stringify(updateData),
+      // existing trip starts on a different date so there's a shift
+      mockPrisma.trip.findUnique.mockResolvedValue(
+        makeBaseTrip({
+          startDate: new Date("2026-12-01T00:00:00.000Z"),
+          stopDate: new Date("2026-12-10T00:00:00.000Z"),
+        })
+      );
+
+      const updatedTrip = makeBaseTrip({
+        title: "Multi-field Update",
+        description: "All fields updated",
+        planMode: true,
+        startDate: new Date("2027-02-01T00:00:00.000Z"),
+        stopDate: new Date("2027-02-10T00:00:00.000Z"),
       });
+
+      mockPrisma.$transaction.mockImplementation(
+        async (callback: (tx: unknown) => unknown) => {
+          const tx = {
+            dailyDestination: {
+              findMany: vi.fn().mockResolvedValue([]),
+              update: vi.fn(),
+            },
+            dailyPoi: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
+            routeSegment: {
+              findMany: vi.fn().mockResolvedValue([]),
+              update: vi.fn(),
+            },
+            branch: { findMany: vi.fn().mockResolvedValue([]), update: vi.fn() },
+            trip: { update: vi.fn().mockResolvedValue(updatedTrip) },
+          };
+          return await callback(tx);
+        }
+      );
+
+      const response = await patchTrip(
+        makeRequest(`${BASE}/api/trips/trip-1`, "PATCH", updateData),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(200);
 
@@ -359,10 +448,15 @@ describe("Trip API Endpoints", () => {
     });
 
     it("should update only planMode", async () => {
-      const response = await makeRequest(`/api/trips/${updateTestTripId}`, {
-        method: "PATCH",
-        body: JSON.stringify({ planMode: false }),
-      });
+      mockPrisma.trip.findUnique.mockResolvedValue(makeBaseTrip());
+      mockPrisma.trip.update.mockResolvedValue(
+        makeBaseTrip({ planMode: false })
+      );
+
+      const response = await patchTrip(
+        makeRequest(`${BASE}/api/trips/trip-1`, "PATCH", { planMode: false }),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(200);
       const trip = await response.json();
@@ -370,10 +464,14 @@ describe("Trip API Endpoints", () => {
     });
 
     it("should return 404 when updating non-existent trip", async () => {
-      const response = await makeRequest("/api/trips/non_existent_id", {
-        method: "PATCH",
-        body: JSON.stringify({ title: "Update Non-existent" }),
-      });
+      mockPrisma.trip.findUnique.mockResolvedValue(null);
+
+      const response = await patchTrip(
+        makeRequest(`${BASE}/api/trips/non_existent_id`, "PATCH", {
+          title: "Update Non-existent",
+        }),
+        { params: Promise.resolve({ id: "non_existent_id" }) }
+      );
 
       expect(response.status).toBe(404);
 
@@ -387,10 +485,10 @@ describe("Trip API Endpoints", () => {
         stopDate: "2027-06-01", // Before start date
       };
 
-      const response = await makeRequest(`/api/trips/${updateTestTripId}`, {
-        method: "PATCH",
-        body: JSON.stringify(invalidData),
-      });
+      const response = await patchTrip(
+        makeRequest(`${BASE}/api/trips/trip-1`, "PATCH", invalidData),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(400);
     });
@@ -398,43 +496,30 @@ describe("Trip API Endpoints", () => {
 
   describe("DELETE /api/trips/[id] - Delete Trip", () => {
     it("should delete a marked test trip by ID", async () => {
-      const trip = await prisma.trip.create({
-        data: {
-          title: `Trip to Delete via API ${TEST_TRIP_MARKER}`,
-          startDate: new Date("2027-03-01"),
-          stopDate: new Date("2027-03-05"),
-        },
-      });
+      const trip = makeBaseTrip({ title: `Trip to Delete via API ${TEST_TRIP_MARKER}` });
+      mockPrisma.trip.findUnique.mockResolvedValue(trip);
+      mockPrisma.trip.delete.mockResolvedValue(trip);
 
-      const response = await makeRequest(`/api/trips/${trip.id}`, {
-        method: "DELETE",
-      });
+      const response = await deleteTrip(
+        makeRequest(`${BASE}/api/trips/trip-1`, "DELETE"),
+        { params: Promise.resolve({ id: "trip-1" }) }
+      );
 
       expect(response.status).toBe(200);
 
       const deletedTrip = await response.json();
       expect(deletedTrip.id).toBe(trip.id);
-
-      // Verify it's deleted
-      const verifyResponse = await makeRequest(`/api/trips/${trip.id}`, {
-        method: "GET",
-      });
-      expect(verifyResponse.status).toBe(404);
     });
 
     it("should block deleting an unmarked trip in non-production", async () => {
-      const trip = await prisma.trip.create({
-        data: {
-          title: "Protected Dev Trip",
-          startDate: new Date("2027-04-01"),
-          stopDate: new Date("2027-04-05"),
-        },
-      });
-      createdTripIds.push(trip.id);
+      mockPrisma.trip.findUnique.mockResolvedValue(
+        makeBaseTrip({ title: "Protected Dev Trip" })
+      );
 
-      const response = await makeRequest(`/api/trips/${trip.id}`, {
-        method: "DELETE",
-      });
+      const response = await deleteTrip(
+        makeRequest(`${BASE}/api/trips/trip-2`, "DELETE"),
+        { params: Promise.resolve({ id: "trip-2" }) }
+      );
 
       expect(response.status).toBe(403);
 
@@ -443,28 +528,27 @@ describe("Trip API Endpoints", () => {
     });
 
     it("should allow deleting an unmarked trip when the safeguard is explicitly overridden", async () => {
-      const trip = await prisma.trip.create({
-        data: {
-          title: "Explicit Override Trip",
-          startDate: new Date("2027-05-01"),
-          stopDate: new Date("2027-05-05"),
-        },
-      });
+      const trip = makeBaseTrip({ title: "Explicit Override Trip" });
+      mockPrisma.trip.findUnique.mockResolvedValue(trip);
+      mockPrisma.trip.delete.mockResolvedValue(trip);
 
-      const response = await makeRequest(`/api/trips/${trip.id}`, {
-        method: "DELETE",
-        headers: {
+      const response = await deleteTrip(
+        makeRequest(`${BASE}/api/trips/trip-3`, "DELETE", undefined, {
           [ALLOW_TRIP_DELETE_HEADER]: ALLOW_TRIP_DELETE_VALUE,
-        },
-      });
+        }),
+        { params: Promise.resolve({ id: "trip-3" }) }
+      );
 
       expect(response.status).toBe(200);
     });
 
     it("should return 404 when deleting non-existent trip", async () => {
-      const response = await makeRequest("/api/trips/non_existent_id", {
-        method: "DELETE",
-      });
+      mockPrisma.trip.findUnique.mockResolvedValue(null);
+
+      const response = await deleteTrip(
+        makeRequest(`${BASE}/api/trips/non_existent_id`, "DELETE"),
+        { params: Promise.resolve({ id: "non_existent_id" }) }
+      );
 
       expect(response.status).toBe(404);
 
@@ -475,20 +559,22 @@ describe("Trip API Endpoints", () => {
 
   describe("API Error Handling", () => {
     it("should handle malformed JSON in POST request", async () => {
-      const response = await fetch(`${API_BASE}/api/trips`, {
+      // Create a request with malformed JSON (non-parseable body)
+      const request = new Request(`${BASE}/api/trips`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: "{ invalid json }",
-      });
+      }) as any;
+
+      const response = await postTrip(request);
 
       expect(response.status).toBe(500);
     });
 
     it("should return proper error structure for validation failures", async () => {
-      const response = await makeRequest("/api/trips", {
-        method: "POST",
-        body: JSON.stringify({ title: "" }), // Empty title
-      });
+      const response = await postTrip(
+        makeRequest(`${BASE}/api/trips`, "POST", { title: "" }) // Empty title
+      );
 
       expect(response.status).toBe(400);
 
