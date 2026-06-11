@@ -170,8 +170,22 @@ describe('PATCH /api/trips/[id]', () => {
 describe('GET/POST /api/trips ownership', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
-  it('GET /api/trips scopes to owner-or-shared trips', async () => {
-    mockPrisma.trip.findMany.mockResolvedValue([]);
+  it('GET /api/trips scopes to owner-or-shared trips and includes only the requesting user\'s share role', async () => {
+    mockPrisma.trip.findMany.mockResolvedValue([
+      {
+        id: 'trip-1',
+        title: 'My Trip',
+        description: null,
+        planMode: false,
+        startDate: new Date('2026-09-01T00:00:00.000Z'),
+        stopDate: new Date('2026-09-05T00:00:00.000Z'),
+        routingPreferences: null,
+        ownerId: 'me',
+        createdAt: new Date('2026-01-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+        shares: [],
+      },
+    ]);
 
     const request = new Request('http://localhost:3000/api/trips', {
       method: 'GET',
@@ -184,8 +198,14 @@ describe('GET/POST /api/trips ownership', () => {
       expect.objectContaining({
         where: { OR: [{ ownerId: 'me' }, { shares: { some: { userId: 'me' } } }] },
         orderBy: { createdAt: 'desc' },
+        include: { shares: { where: { userId: 'me' }, select: { role: true } } },
       })
     );
+
+    const body = await response.json();
+    expect(body).toHaveLength(1);
+    // shares array should be passed through (only the requesting user's own share row)
+    expect(body[0].shares).toEqual([]);
   });
 
   it('POST /api/trips stamps ownerId from session', async () => {

@@ -74,6 +74,7 @@ export async function GET(request: NextRequest) {
     const trips = await prisma.trip.findMany({
       where: { OR: [{ ownerId: userId }, { shares: { some: { userId } } }] },
       orderBy: { createdAt: "desc" },
+      include: { shares: { where: { userId }, select: { role: true } } },
     });
 
     const parsed = trips.map((t) => ({

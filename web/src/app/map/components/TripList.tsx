@@ -7,7 +7,15 @@
  */
 
 import React, { useEffect, useState } from 'react';
+import { useSession } from 'next-auth/react';
 import type { TripResponse } from '@/lib/schemas/trip';
+import ShareDialog from '@/app/components/ShareDialog';
+
+// Extended trip type that includes ownership/share fields returned by GET /api/trips
+interface TripWithAccess extends TripResponse {
+  ownerId: string;
+  shares?: { role: 'VIEWER' | 'EDITOR' }[];
+}
 
 interface TripListProps {
   /**
@@ -37,9 +45,11 @@ export default function TripList({
   onTripDelete,
   refreshTrigger = 0,
 }: TripListProps) {
-  const [trips, setTrips] = useState<TripResponse[]>([]);
+  const { data: session } = useSession();
+  const [trips, setTrips] = useState<TripWithAccess[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [shareOpenTripId, setShareOpenTripId] = useState<string | null>(null);
 
   // Fetch trips from API
   const fetchTrips = async () => {
@@ -53,7 +63,7 @@ export default function TripList({
         throw new Error(`Failed to fetch trips: ${response.statusText}`);
       }
       
-      const data = await response.json();
+      const data: TripWithAccess[] = await response.json();
       setTrips(data);
     } catch (err) {
       console.error('[TripList] Error fetching trips:', err);
@@ -154,8 +164,16 @@ export default function TripList({
         </h3>
       </div>
 
+      {shareOpenTripId && (
+        <ShareDialog tripId={shareOpenTripId} onClose={() => setShareOpenTripId(null)} />
+      )}
+
       <div className="space-y-2">
-        {trips.map((trip) => (
+        {trips.map((trip) => {
+          const isOwner = trip.ownerId === session?.user?.id;
+          const sharedRole = !isOwner ? (trip.shares?.[0]?.role ?? 'VIEWER') : null;
+
+          return (
           <div
             key={trip.id}
             className="rounded-lg border border-neutral-200 bg-white p-4 shadow-sm hover:shadow-md transition-shadow"
@@ -213,35 +231,48 @@ export default function TripList({
             </div>
 
             {/* Action buttons */}
-            {(onTripEdit || onTripDelete) && (
-              <div className="mt-3 flex gap-2 border-t border-neutral-100 pt-3">
-                {onTripEdit && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onTripEdit(trip);
-                    }}
-                    className="flex-1 rounded-md bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 hover:bg-primary-100 transition-all"
-                  >
-                    Edit
-                  </button>
-                )}
-                
-                {onTripDelete && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onTripDelete(trip);
-                    }}
-                    className="flex-1 rounded-md bg-error-50 px-3 py-2 text-sm font-medium text-error-700 hover:bg-error-100 transition-all"
-                  >
-                    Delete
-                  </button>
-                )}
-              </div>
-            )}
+            <div className="mt-3 flex gap-2 border-t border-neutral-100 pt-3">
+              {isOwner ? (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShareOpenTripId(trip.id);
+                  }}
+                  className="rounded-md bg-neutral-50 px-3 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-100 transition-all"
+                >
+                  Share
+                </button>
+              ) : (
+                <span className="rounded-md bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700">
+                  Shared · {sharedRole === 'EDITOR' ? 'edit' : 'view'}
+                </span>
+              )}
+              {onTripEdit && isOwner && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTripEdit(trip);
+                  }}
+                  className="flex-1 rounded-md bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 hover:bg-primary-100 transition-all"
+                >
+                  Edit
+                </button>
+              )}
+              {onTripDelete && isOwner && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTripDelete(trip);
+                  }}
+                  className="flex-1 rounded-md bg-error-50 px-3 py-2 text-sm font-medium text-error-700 hover:bg-error-100 transition-all"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
