@@ -23,16 +23,19 @@ async function main() {
     create: { email, passwordHash: await hash(password), name: 'Admin', isAdmin: true },
   });
 
-  // ownerId is NOT NULL in the schema (migration B applied); no ownerless trips
-  // can exist. Keep a zero-count result for the log line below.
-  const trips = { count: 0 };
+  // Backfill ownerless trips via raw SQL. This script is meant to run during the
+  // intermediate state (Migration A applied: owner_id nullable) BEFORE Migration B
+  // makes owner_id NOT NULL. Raw SQL is used because the generated Prisma client is
+  // typed against the final schema, where `where: { ownerId: null }` is not valid.
+  // Returns the number of rows updated; on a post-Migration-B database this is 0.
+  const tripCount = await prisma.$executeRaw`UPDATE "trips" SET "owner_id" = ${admin.id} WHERE "owner_id" IS NULL`;
 
   const devices = await prisma.device.updateMany({
     where: { userId: null },
     data: { userId: admin.id },
   });
 
-  console.log(`Admin ${admin.email}: backfilled ${trips.count} trips, ${devices.count} devices`);
+  console.log(`Admin ${admin.email}: backfilled ${tripCount} trips, ${devices.count} devices`);
 }
 
 main()
