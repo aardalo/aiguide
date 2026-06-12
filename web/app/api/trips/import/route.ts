@@ -18,7 +18,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/prisma';
 import { migrateToCurrent, ImportFormatError } from '@/lib/trip-export/migrations';
 import { importTrip, ImportError } from '@/lib/trip-export/import';
-import { getSessionUser, accessErrorResponse } from '@/lib/auth/access';
+import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
 
 const importRequestSchema = z.object({
   document: z.unknown(),
@@ -59,6 +59,18 @@ export async function POST(request: NextRequest) {
       { error: 'targetTripId is required when mode is "merge".' },
       { status: 400 },
     );
+  }
+
+  // Merge writes into an existing trip — the caller must have edit access to it.
+  // (New imports create a trip owned by the caller, so they need no target check.)
+  if (mode === 'merge' && targetTripId) {
+    try {
+      await assertTripAccess(userId, targetTripId, 'edit');
+    } catch (error) {
+      const ae = accessErrorResponse(error);
+      if (ae) return ae;
+      throw error;
+    }
   }
 
   // Validate + migrate the file to the current format version.

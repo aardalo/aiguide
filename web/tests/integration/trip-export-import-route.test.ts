@@ -32,6 +32,7 @@ vi.mock('@/lib/auth/access', () => ({
 import { GET } from '../../app/api/trips/[id]/export/route';
 import { POST } from '../../app/api/trips/import/route';
 import { buildExportEnvelope } from '@/lib/trip-export/serialize';
+import { assertTripAccess, accessErrorResponse, AccessError } from '@/lib/auth/access';
 
 function tripRow() {
   return {
@@ -158,6 +159,31 @@ describe('POST /api/trips/import', () => {
       makeRequest({ document: validDocument(), mode: 'merge' }) as never,
     );
     expect(response.status).toBe(400);
+  });
+
+  it('rejects merge into a trip the user cannot edit (403) and never runs the import', async () => {
+    vi.mocked(assertTripAccess).mockRejectedValueOnce(new AccessError(403, 'Forbidden'));
+    vi.mocked(accessErrorResponse).mockImplementationOnce((e: unknown) =>
+      e instanceof AccessError
+        ? (new Response(JSON.stringify({ error: e.message }), {
+            status: e.status,
+            headers: { 'Content-Type': 'application/json' },
+          }) as never)
+        : null,
+    );
+
+    const response = await POST(
+      makeRequest({
+        document: validDocument(),
+        mode: 'merge',
+        targetTripId: 'cltarget0000000000000001',
+      }) as never,
+    );
+
+    expect(response.status).toBe(403);
+    expect(assertTripAccess).toHaveBeenCalledWith('test-user', 'cltarget0000000000000001', 'edit');
+    // The import engine must never run for an unauthorized merge.
+    expect(mockPrisma.$transaction).not.toHaveBeenCalled();
   });
 
   it('returns 404 when merge target is not found', async () => {
