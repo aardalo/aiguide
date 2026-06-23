@@ -2,6 +2,7 @@
 import { Suspense, useState } from 'react';
 import { signIn } from 'next-auth/react';
 import { useSearchParams } from 'next/navigation';
+import { safeRedirectPath } from './safeRedirectPath';
 
 function LoginForm() {
   const params = useSearchParams();
@@ -21,7 +22,9 @@ function LoginForm() {
       setError('Invalid email or password');
       return;
     }
-    window.location.href = res?.url ?? callbackUrl;
+    // res.url carries the server's origin (localhost in dev); keep only the
+    // path so we stay on the host the user is actually on. See safeRedirectPath.
+    window.location.href = safeRedirectPath(res?.url, callbackUrl);
   }
 
   return (

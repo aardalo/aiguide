@@ -1,11 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSetting, SETTING_KEYS } from '@/lib/settings';
+import { assertAdmin, accessErrorResponse } from '@/lib/auth/access';
 
 /**
  * GET /api/discover-experiences/test-key
  * Diagnostic endpoint: sends a minimal API call to verify the configured AI provider key works.
+ * Admin only — this endpoint confirms whether a secret key is valid.
  */
 export async function GET(_request: NextRequest) {
+  try {
+    await assertAdmin();
+  } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
+    throw error;
+  }
+
   const aiProvider = (await getSetting(SETTING_KEYS.AI_PROVIDER)) ?? 'chatgpt';
 
   if (aiProvider === 'claude') {

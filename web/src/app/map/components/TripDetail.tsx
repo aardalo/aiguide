@@ -66,6 +66,10 @@ interface TripDetailProps {
   onToast?: (text: string | null) => void;
   /** Called when a via-point is clicked in the sidebar — zoom map to that location. */
   onViaPointClick?: (lat: number, lng: number) => void;
+  /** Called after a POI or parkup is deleted from the day list. */
+  onPoiDeleted?: (id: string) => void;
+  /** Called after a day is inserted or removed so the parent can re-fetch POIs. */
+  onUpdate?: () => void;
   /** Callback when AI Research discovers experiences — used to show markers on map. */
   onExperiencesDiscovered?: (experiences: Array<{
     name: string;
@@ -103,7 +107,9 @@ export default function TripDetail({
   onDestinationClick,
   onToast,
   onViaPointClick,
+  onPoiDeleted,
   onExperiencesDiscovered,
+  onUpdate,
 }: TripDetailProps) {
   const [trip, setTrip] = useState<TripResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -553,12 +559,14 @@ export default function TripDetail({
             onTripChange={(updatedTrip) => setTrip(updatedTrip)}
             onUpdate={() => {
               if (tripId) fetchTripDetails(tripId);
+              onUpdate?.();
             }}
             onPoiClick={onPoiClick}
             onDestinationClick={onDestinationClick}
             onStatusMessage={onStatusMessage}
             onToast={onToast}
             onViaPointClick={onViaPointClick}
+            onPoiDeleted={onPoiDeleted}
           />
         )}
 

@@ -4,6 +4,11 @@
  * Returns the active map provider and the tile API key (unredacted).
  * The key is returned in clear text because it must be embedded in tile request
  * URLs that are already visible in browser DevTools.
+ *
+ * SECURITY: Any authenticated user can retrieve the map API key via this endpoint.
+ * Mitigate key abuse by restricting it at the provider console:
+ *   - Mapbox: Dashboard → Tokens → restrict to allowed URLs / referrer domains
+ *   - Google Maps: Cloud Console → Credentials → HTTP referrer restrictions
  */
 
 import { NextResponse } from 'next/server';

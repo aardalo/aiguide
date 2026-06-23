@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { upsertSetting } from '@/lib/settings';
 import { settingUpsertSchema } from '@/lib/schemas/routing';
+import { assertAdmin, accessErrorResponse } from '@/lib/auth/access';
 
 /** Keys whose values must never be returned to the browser. */
 const SENSITIVE_KEY_PATTERNS = [/api_key$/i, /api_secret$/i, /password$/i, /token$/i];
@@ -34,9 +35,10 @@ export async function GET() {
   }
 }
 
-/** DELETE /api/settings — remove a single setting by key */
+/** DELETE /api/settings — remove a single setting by key (admin only) */
 export async function DELETE(request: NextRequest) {
   try {
+    await assertAdmin();
     const body = await request.json();
     const key = body?.key;
     if (!key || typeof key !== 'string') {
@@ -45,14 +47,17 @@ export async function DELETE(request: NextRequest) {
     await prisma.setting.deleteMany({ where: { key } });
     return NextResponse.json({ ok: true });
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[DELETE /api/settings] Error:', err);
     return NextResponse.json({ error: 'Failed to delete setting' }, { status: 500 });
   }
 }
 
-/** PUT /api/settings — upsert { key, value } */
+/** PUT /api/settings — upsert { key, value } (admin only) */
 export async function PUT(request: NextRequest) {
   try {
+    await assertAdmin();
     const body = await request.json();
     const validation = settingUpsertSchema.safeParse(body);
     if (!validation.success) {
@@ -67,6 +72,8 @@ export async function PUT(request: NextRequest) {
 
     return NextResponse.json({ key, value: isSensitiveKey(key) ? '[SET]' : value });
   } catch (err) {
+    const ae = accessErrorResponse(err);
+    if (ae) return ae;
     console.error('[PUT /api/settings] Error:', err);
     return NextResponse.json({ error: 'Failed to save setting' }, { status: 500 });
   }

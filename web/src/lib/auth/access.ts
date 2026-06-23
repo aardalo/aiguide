@@ -20,12 +20,20 @@ export class AccessError extends Error {
  * Routes are already gated by middleware, but call this to obtain the id and
  * to defend against direct invocation.
  */
-export async function getSessionUser(): Promise<{ id: string }> {
+export async function getSessionUser(): Promise<{ id: string; isAdmin: boolean }> {
   const session = await auth();
   if (!session?.user?.id) {
     throw new AccessError(401, 'Unauthenticated');
   }
-  return { id: session.user.id };
+  return { id: session.user.id, isAdmin: session.user.isAdmin === true };
+}
+
+/**
+ * Throws 403 if the session user is not an admin.
+ */
+export async function assertAdmin(): Promise<void> {
+  const { isAdmin } = await getSessionUser();
+  if (!isAdmin) throw new AccessError(403, 'Forbidden');
 }
 
 /**
@@ -61,6 +69,19 @@ export async function assertTripAccess(
 export function accessErrorResponse(error: unknown): NextResponse | null {
   if (error instanceof AccessError) {
     return NextResponse.json({ error: error.message }, { status: error.status });
+  }
+  return null;
+}
+
+/**
+ * Like accessErrorResponse, but converts 403 → 404 for sub-resource routes
+ * (e.g. /api/daily-destinations/[id]) so that callers cannot distinguish
+ * "resource doesn't exist" from "resource exists but you can't access it".
+ */
+export function subResourceAccessErrorResponse(error: unknown): NextResponse | null {
+  if (error instanceof AccessError) {
+    const status = error.status === 403 ? 404 : error.status;
+    return NextResponse.json({ error: 'Not found' }, { status });
   }
   return null;
 }

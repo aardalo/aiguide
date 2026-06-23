@@ -9,7 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { z } from 'zod';
-import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
+import { getSessionUser, assertTripAccess, subResourceAccessErrorResponse as accessErrorResponse } from '@/lib/auth/access';
 
 const poiUpdateSchema = z.object({
   name: z.string().min(1).max(200).optional(),

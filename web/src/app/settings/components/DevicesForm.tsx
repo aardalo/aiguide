@@ -14,7 +14,6 @@ import { useDeviceIdentity } from '@/app/hooks';
 
 interface Device {
   id: string;
-  sessionId: string;
   name: string;
   lastSeenAt: string;
   createdAt: string;

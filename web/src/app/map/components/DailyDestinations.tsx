@@ -52,9 +52,11 @@ interface DailyDestinationsProps {
   onToast?: (text: string | null) => void;
   /** Called when a via-point is clicked in the sidebar — zoom map to that location. */
   onViaPointClick?: (lat: number, lng: number) => void;
+  /** Called after a POI or parkup is deleted so the parent can remove it from its state. */
+  onPoiDeleted?: (id: string) => void;
 }
 
-export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId, onPoiClick, onDestinationClick, onStatusMessage, onToast, onViaPointClick }: DailyDestinationsProps) {
+export default function DailyDestinations({ trip, onTripChange, onUpdate, onRouteData, segmentRefreshTrigger, destinationRefreshTrigger, onFitPoints, onDaySelect, pois = [], initialSelectedDayId, onPoiClick, onDestinationClick, onStatusMessage, onToast, onViaPointClick, onPoiDeleted }: DailyDestinationsProps) {
   const [destinations, setDestinations] = useState<DailyDestinationResponse[]>([]);
   const [segments, setSegments] = useState<RouteSegmentResponse[]>([]);
   const [branches, setBranches] = useState<BranchResponse[]>([]);
@@ -71,6 +73,9 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
   const [activeBranchIndex, setActiveBranchIndex] = useState(0);
   // 'home' | destination.id | null — tracks which day badge is highlighted in the sidebar
   const [selectedDayId, setSelectedDayId] = useState<string | null>(initialSelectedDayId ?? null);
+  // Which POI/via/parkup item is showing its remove X (null = none)
+  const [hoveredItemId, setHoveredItemId] = useState<string | null>(null);
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Fetch daily destinations for the trip — returns the fetched array
   const fetchDestinations = async (): Promise<DailyDestinationResponse[]> => {
@@ -368,6 +373,39 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
     fetchDestinations().then(() => generateRoutes());
   }, [destinationRefreshTrigger]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleItemHoverEnter = (id: string) => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    setHoveredItemId(id);
+  };
+
+  const handleItemHoverLeave = () => {
+    hoverTimerRef.current = setTimeout(() => setHoveredItemId(null), 600);
+  };
+
+  const handleDeletePoi = async (id: string) => {
+    setHoveredItemId(null);
+    try {
+      const res = await fetch(`/api/daily-pois/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete POI');
+      onPoiDeleted?.(id);
+    } catch (err) {
+      console.error('[DailyDestinations] Error deleting POI:', err);
+    }
+  };
+
+  const handleDeleteVia = async (id: string) => {
+    setHoveredItemId(null);
+    try {
+      const res = await fetch(`/api/route-waypoints/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete via-point');
+      const segsRes = await fetch(`/api/route-segments?tripId=${trip.id}`);
+      const segs = await segsRes.json();
+      if (Array.isArray(segs)) setSegments(segs);
+    } catch (err) {
+      console.error('[DailyDestinations] Error deleting via-point:', err);
+    }
+  };
+
   // Delete destination
   const handleDelete = async (destinationId: string) => {
     if (!confirm('Are you sure you want to delete this destination?')) {
@@ -503,6 +541,7 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
       onTripChange?.(updatedTrip);
       await fetchDestinations();
       await generateRoutes();
+      onUpdate?.();
     } catch (err) {
       console.error('[DailyDestinations] Remove day error:', err);
     } finally {
@@ -529,6 +568,7 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
       onTripChange?.(updatedTrip);
       await fetchDestinations();
       await generateRoutes();
+      onUpdate?.();
     } catch (err) {
       console.error('[DailyDestinations] Insert day error:', err);
     } finally {
@@ -1128,30 +1168,66 @@ export default function DailyDestinations({ trip, onTripChange, onUpdate, onRout
                         <div
                           key={wp.id}
                           className={`flex items-center gap-1.5 text-xs text-orange-700 ${onViaPointClick ? 'cursor-pointer hover:text-orange-900' : ''}`}
+                          onMouseEnter={() => handleItemHoverEnter(wp.id)}
+                          onMouseLeave={handleItemHoverLeave}
                           onClick={() => onViaPointClick?.(wp.latitude, wp.longitude)}
                         >
                           <span className="shrink-0">◆</span>
                           <span className="truncate">Via-point</span>
+                          {hoveredItemId === wp.id && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); handleDeleteVia(wp.id); }}
+                              className="shrink-0 leading-none text-neutral-400 hover:text-error-600 transition-colors"
+                              title="Remove via-point"
+                            >
+                              ×
+                            </button>
+                          )}
                         </div>
                       ))}
                       {parkups.map((p) => (
                         <div
                           key={p.id}
                           className={`flex items-center gap-1.5 text-xs text-emerald-700 ${onPoiClick ? 'cursor-pointer hover:text-emerald-900' : ''}`}
+                          onMouseEnter={() => handleItemHoverEnter(p.id)}
+                          onMouseLeave={handleItemHoverLeave}
                           onClick={() => onPoiClick?.(p)}
                         >
                           <span className="shrink-0">🚐</span>
                           <span className="truncate">{p.name}</span>
+                          {hoveredItemId === p.id && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); handleDeletePoi(p.id); }}
+                              className="shrink-0 leading-none text-neutral-400 hover:text-error-600 transition-colors"
+                              title="Remove parkup"
+                            >
+                              ×
+                            </button>
+                          )}
                         </div>
                       ))}
                       {regularPois.map((p) => (
                         <div
                           key={p.id}
                           className={`flex items-center gap-1.5 text-xs text-violet-700 ${onPoiClick ? 'cursor-pointer hover:text-violet-900' : ''}`}
+                          onMouseEnter={() => handleItemHoverEnter(p.id)}
+                          onMouseLeave={handleItemHoverLeave}
                           onClick={() => onPoiClick?.(p)}
                         >
                           <span className="shrink-0">📌</span>
                           <span className="truncate">{p.name}</span>
+                          {hoveredItemId === p.id && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); handleDeletePoi(p.id); }}
+                              className="shrink-0 leading-none text-neutral-400 hover:text-error-600 transition-colors"
+                              title="Remove POI"
+                            >
+                              ×
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>

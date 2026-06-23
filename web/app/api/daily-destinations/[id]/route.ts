@@ -13,7 +13,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { dailyDestinationUpdateSchema } from "@/lib/schemas/trip";
-import { getSessionUser, assertTripAccess, accessErrorResponse } from "@/lib/auth/access";
+import { getSessionUser, assertTripAccess, subResourceAccessErrorResponse as accessErrorResponse } from "@/lib/auth/access";
 
 /**
  * GET /api/daily-destinations/[id]

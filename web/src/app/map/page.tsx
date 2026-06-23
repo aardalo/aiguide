@@ -13,7 +13,7 @@
  * - Trip list and detail views (TASK-006)
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useSession, signOut } from 'next-auth/react';
 import 'leaflet/dist/leaflet.css';
@@ -32,6 +32,12 @@ import MapTypeSwitcher from './components/MapTypeSwitcher';
 import SyncStatus from './components/SyncStatus';
 import { useDeviceIdentity } from '@/app/hooks/useDeviceIdentity';
 import { useTripsPolling, type ChangeItem } from '@/app/hooks/useTripsPolling';
+import {
+  loadPersistedState,
+  savePersistedState,
+  canRestoreState,
+  type PersistedUiState,
+} from './uiStatePersistence';
 import type { TripResponse, DailyDestinationResponse, DailyPoiResponse, BranchResponse } from '@/lib/schemas/trip';
 import type { RouteSegmentResponse, RouteWaypointResponse } from '@/lib/schemas/routing';
 import type { NearbyPlace } from '@/lib/nearby/types';
@@ -272,32 +278,7 @@ type CastConnectionState =
   | 'connected'
   | 'error';
 
-// ── localStorage persistence ────────────────────────────────────────────────
-const STORAGE_KEY = 'tripPlanner:uiState';
-
-interface PersistedState {
-  tripId: string | null;
-  mapLat: number;
-  mapLng: number;
-  mapZoom: number;
-  selectedDayDestId: string | null;
-}
-
-function loadPersistedState(): PersistedState | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw) as PersistedState;
-  } catch {
-    return null;
-  }
-}
-
-function savePersistedState(state: PersistedState): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch { /* quota exceeded — ignore */ }
-}
+// localStorage persistence of map UI state lives in ./uiStatePersistence.
 
 /** Return "Day N" for the given destination ID, or null if none/home. */
 function getDayLabel(
@@ -332,7 +313,8 @@ export default function MapPage() {
   const statusBarRef = useRef<StatusBarHandle>(null);
   const routeLayerRef = useRef<any>(null); // Leaflet LayerGroup for route overlays
   const [isMapReady, setIsMapReady] = useState(false);
-  const restoredRef = useRef<PersistedState | null>(null);
+  const restoredRef = useRef<PersistedUiState | null>(null);
+  const hasRestoredRef = useRef(false);
 
   // Map type/layer switching
   const tileLayerRef = useRef<any>(null);
@@ -456,6 +438,10 @@ export default function MapPage() {
 
   // ── Auth session ────────────────────────────────────────────────────────────
   const { data: session } = useSession();
+  // Keep a ref mirror of the user id so once-bound map event handlers (set up in
+  // a one-time effect) always persist state stamped with the current user.
+  const userIdRef = useRef<string | null>(null);
+  useEffect(() => { userIdRef.current = session?.user?.id ?? null; }, [session?.user?.id]);
   // Claim the current device when the user logs in so the device is linked to
   // their account (Device.userId) and per-device sync stays correct.
   useEffect(() => {
@@ -776,6 +762,26 @@ export default function MapPage() {
     'foursquare:arts': 'Arts',
   };
 
+  // Key identifying an AI place by provider + rounded location (~11m), used to
+  // de-duplicate cached AI places against fresh AI Research results — they are
+  // the same places surfaced through two paths (Show Cached vs AI Research).
+  const aiPlaceKey = (provider: string | undefined, lat: number, lng: number) =>
+    `${provider ?? ''}:${lat.toFixed(4)}:${lng.toFixed(4)}`;
+
+  const experienceKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const e of experienceResults) {
+      keys.add(aiPlaceKey(e.aiProvider, e.approximateLat, e.approximateLng));
+    }
+    return keys;
+  }, [experienceResults]);
+
+  /** A cached AI nearby place that is already shown as a fresh AI Research result. */
+  const isCachedAiDuplicate = useCallback((place: NearbyPlace): boolean => {
+    if (place.provider !== 'chatgpt' && place.provider !== 'claude') return false;
+    return experienceKeys.has(aiPlaceKey(place.provider, place.lat, place.lng));
+  }, [experienceKeys]);
+
   /** Build filter groups from current marker data */
   const buildFilterGroups = useCallback((): MarkerFilterGroup[] => {
     const groups: MarkerFilterGroup[] = [];
@@ -808,35 +814,24 @@ export default function MapPage() {
         groups.push({ key: `nearby:${prov}`, label: PROVIDER_LABELS[prov] ?? prov, items });
       }
 
-      // AI-researched cached places (from Show Cached) — both ChatGPT and Claude
-      const aiCachedPlaces = visibleNearby.filter((p) => p.provider === 'chatgpt' || p.provider === 'claude');
-      if (aiCachedPlaces.length > 0) {
-        const byStars = new Map<number, number>();
-        for (const p of aiCachedPlaces) {
-          const stars = p.michelinStars ?? 1;
-          byStars.set(stars, (byStars.get(stars) ?? 0) + 1);
-        }
-        const items: MarkerFilterGroup['items'] = [];
-        for (const [stars, count] of [...byStars].sort((a, b) => b[0] - a[0])) {
-          items.push({
-            key: `stars:${stars}`,
-            label: `${'★'.repeat(stars)} ${stars === 3 ? 'Must-visit' : stars === 2 ? 'Worth a detour' : 'Worth a stop'}`,
-            count,
-            iconHtml: makeExperienceMarkerHtml(stars),
-          });
-        }
-        groups.push({ key: 'nearby:chatgpt', label: 'AI Cached', items });
-      }
+      // (AI places are merged into the single "AI Research" group below.)
     }
 
-    // AI experience results (from AI Research button)
-    if (experienceResults.length > 0) {
-      const visibleExp = experienceResults.filter((e) => inBounds(e.approximateLat, e.approximateLng));
-      if (visibleExp.length > 0) {
-        const byStars = new Map<number, number>();
-        for (const e of visibleExp) {
-          byStars.set(e.michelinStars, (byStars.get(e.michelinStars) ?? 0) + 1);
-        }
+    // AI Research — fresh experience results plus cached AI places that aren't
+    // already shown as fresh results (same provider + location). One category.
+    {
+      const byStars = new Map<number, number>();
+      for (const e of experienceResults) {
+        if (!inBounds(e.approximateLat, e.approximateLng)) continue;
+        byStars.set(e.michelinStars, (byStars.get(e.michelinStars) ?? 0) + 1);
+      }
+      for (const p of nearbyResults) {
+        if (p.provider !== 'chatgpt' && p.provider !== 'claude') continue;
+        if (!inBounds(p.lat, p.lng) || isCachedAiDuplicate(p)) continue;
+        const stars = p.michelinStars ?? 1;
+        byStars.set(stars, (byStars.get(stars) ?? 0) + 1);
+      }
+      if (byStars.size > 0) {
         const items: MarkerFilterGroup['items'] = [];
         for (const [stars, count] of [...byStars].sort((a, b) => b[0] - a[0])) {
           items.push({
@@ -868,7 +863,7 @@ export default function MapPage() {
     }
 
     return groups;
-  }, [nearbyResults, experienceResults, tripPois, mapBounds]);
+  }, [nearbyResults, experienceResults, tripPois, mapBounds, isCachedAiDuplicate]);
 
   const handleToggleFilterItem = useCallback((groupKey: string, itemKey: string) => {
     setMarkerHidden((prev) => {
@@ -907,11 +902,14 @@ export default function MapPage() {
   const isNearbyVisible = useCallback((place: NearbyPlace): boolean => {
     const prov = place.provider ?? 'osm';
     if (prov === 'chatgpt' || prov === 'claude') {
+      // Already drawn as a fresh AI Research marker — don't double up.
+      if (isCachedAiDuplicate(place)) return false;
+      // Cached AI places share the merged "AI Research" filter group.
       const stars = place.michelinStars ?? 1;
-      return !(markerHidden['nearby:chatgpt']?.has(`stars:${stars}`));
+      return !(markerHidden['experience']?.has(`stars:${stars}`));
     }
     return !(markerHidden[`nearby:${prov}`]?.has(place.type));
-  }, [markerHidden]);
+  }, [markerHidden, isCachedAiDuplicate]);
 
   /** Check if an experience marker should be visible */
   const isExperienceVisible = useCallback((exp: DiscoveredExperienceMarker): boolean => {
@@ -928,10 +926,15 @@ export default function MapPage() {
     }
   }, [nearbyResults, experienceResults]);
 
-  // Restore persisted state from localStorage on mount (avoids hydration mismatch)
+  // Restore persisted state from localStorage once the session user is known
   useEffect(() => {
+    const userId = session?.user?.id;
+    if (!userId || hasRestoredRef.current) return;
+    hasRestoredRef.current = true;
     const saved = loadPersistedState();
-    if (!saved) return;
+    // Only restore state that belongs to the current user (prevents cross-user
+    // trip access). canRestoreState also rejects missing state / unknown user.
+    if (!canRestoreState(saved, userId)) return;
     restoredRef.current = saved;
     selectedDayDestIdRef.current = saved.selectedDayDestId ?? null;
     if (saved.tripId) {
@@ -943,14 +946,16 @@ export default function MapPage() {
         .then((pois) => { if (Array.isArray(pois)) setTripPois(pois); })
         .catch(() => {});
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [session?.user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep ref mirror in sync and persist trip/day changes
   useEffect(() => {
     selectedTripIdRef.current = selectedTripId;
     if (!mapRef.current) return;
+    const userId = userIdRef.current;
+    if (!userId) return;
     const c = mapRef.current.getCenter();
-    savePersistedState({
+    savePersistedState(userId, {
       tripId: selectedTripId,
       mapLat: c.lat,
       mapLng: c.lng,
@@ -2346,9 +2351,9 @@ export default function MapPage() {
       }
     }
     // Persist selected day
-    if (mapRef.current) {
+    if (mapRef.current && userIdRef.current) {
       const c = mapRef.current.getCenter();
-      savePersistedState({
+      savePersistedState(userIdRef.current, {
         tripId: selectedTripIdRef.current,
         mapLat: c.lat,
         mapLng: c.lng,
@@ -2565,13 +2570,15 @@ export default function MapPage() {
         // Save map position/zoom to localStorage on every move; update filter bounds
         map.on('moveend', () => {
           const c = map.getCenter();
-          savePersistedState({
-            tripId: selectedTripIdRef.current,
-            mapLat: c.lat,
-            mapLng: c.lng,
-            mapZoom: map.getZoom(),
-            selectedDayDestId: selectedDayDestIdRef.current,
-          });
+          if (userIdRef.current) {
+            savePersistedState(userIdRef.current, {
+              tripId: selectedTripIdRef.current,
+              mapLat: c.lat,
+              mapLng: c.lng,
+              mapZoom: map.getZoom(),
+              selectedDayDestId: selectedDayDestIdRef.current,
+            });
+          }
           const b = map.getBounds();
           const sw = b.getSouthWest();
           const ne = b.getNorthEast();
@@ -2759,6 +2766,8 @@ export default function MapPage() {
           onPoiClick={handleSidebarPoiClick}
           onDestinationClick={handleSidebarDestinationClick}
           onViaPointClick={handleSidebarViaPointClick}
+          onPoiDeleted={(id) => setTripPois((prev) => prev.filter((p) => p.id !== id))}
+          onUpdate={() => { if (selectedTripId) refetchTripPois(selectedTripId); }}
         />
       )}
 

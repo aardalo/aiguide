@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
+import { getSessionUser, accessErrorResponse } from "@/lib/auth/access";
 
 const updateSchema = z.object({
   name: z.string().min(1).max(200),
@@ -31,15 +32,21 @@ export async function PATCH(
 ) {
   try {
     const { id } = await params;
-    const body = await request.json();
+    const { id: userId } = await getSessionUser();
 
+    const existing = await prisma.device.findUnique({ where: { id }, select: { userId: true } });
+    if (!existing) {
+      return NextResponse.json({ error: "Device not found" }, { status: 404 });
+    }
+    if (existing.userId !== userId) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
+    const body = await request.json();
     const validation = updateSchema.safeParse(body);
     if (!validation.success) {
       return NextResponse.json(
-        {
-          error: "Validation failed",
-          issues: validation.error.flatten(),
-        },
+        { error: "Validation failed", issues: validation.error.flatten() },
         { status: 400 }
       );
     }
@@ -52,7 +59,6 @@ export async function PATCH(
     return NextResponse.json(
       {
         id: device.id,
-        sessionId: device.sessionId,
         name: device.name,
         lastSeenAt: device.lastSeenAt.toISOString(),
         createdAt: device.createdAt.toISOString(),
@@ -60,6 +66,8 @@ export async function PATCH(
       { status: 200 }
     );
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2025"
@@ -79,16 +87,27 @@ export async function PATCH(
  * Remove a device. Sync attribution on entities is set to null (onDelete: SetNull).
  */
 export async function DELETE(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const { id } = await params;
+    const { id: userId } = await getSessionUser();
+
+    const existing = await prisma.device.findUnique({ where: { id }, select: { userId: true } });
+    if (!existing) {
+      return NextResponse.json({ error: "Device not found" }, { status: 404 });
+    }
+    if (existing.userId !== userId) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
 
     await prisma.device.delete({ where: { id } });
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2025"

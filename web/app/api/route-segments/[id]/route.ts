@@ -13,7 +13,7 @@ import { prisma } from '@/lib/prisma';
 import { getActiveRoutingProvider } from '@/lib/routing';
 import { generateDistanceWaypoints } from '@/lib/routing/waypoints';
 import { getSetting, SETTING_KEYS } from '@/lib/settings';
-import { getSessionUser, assertTripAccess, accessErrorResponse } from '@/lib/auth/access';
+import { getSessionUser, assertTripAccess, subResourceAccessErrorResponse as accessErrorResponse } from '@/lib/auth/access';
 
 const patchBodySchema = z.object({
   latitude: z.number(),

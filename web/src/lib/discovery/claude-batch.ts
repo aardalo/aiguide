@@ -3,7 +3,7 @@ import { chatGptResponseSchema } from '@/lib/schemas/discovery';
 import { repairJson } from './json-repair';
 
 const ANTHROPIC_BATCHES_URL = 'https://api.anthropic.com/v1/messages/batches';
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const TEMPERATURE = 0.3;
 const MAX_TOKENS = 4000;
 const POLL_INTERVAL_MS = 5000;

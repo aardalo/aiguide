@@ -8,9 +8,10 @@ vi.mock('@/lib/auth/password', () => ({ hashPassword: vi.fn(async () => '$argon2
 
 import { POST } from '../../app/api/auth/register/route';
 import { Prisma } from '@prisma/client';
+import { NextRequest } from 'next/server';
 
 function req(body: unknown) {
-  return new Request('http://localhost:3000/api/auth/register', {
+  return new NextRequest('http://localhost:3000/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

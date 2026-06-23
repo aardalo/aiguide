@@ -232,6 +232,17 @@ export default function TripList({
 
             {/* Action buttons */}
             <div className="mt-3 flex gap-2 border-t border-neutral-100 pt-3">
+              {onTripSelect && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTripSelect(trip);
+                  }}
+                  className="flex-1 rounded-md bg-primary-600 px-3 py-2 text-sm font-medium text-white hover:bg-primary-700 transition-all"
+                >
+                  Open
+                </button>
+              )}
               {isOwner ? (
                 <button
                   onClick={(e) => {

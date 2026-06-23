@@ -180,7 +180,7 @@ export async function discoverExperiences(
 
   const progress = options.onProgress ?? (() => {});
   const providerLabel = aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
-  const modelLabel = options.model || (aiProvider === 'claude' ? 'claude-sonnet-4' : 'gpt-4o');
+  const modelLabel = options.model || (aiProvider === 'claude' ? 'claude-sonnet-4-6' : 'gpt-4o');
 
   // Pre-fetch search results from SearXNG (if configured)
   const knownNames = knownPlaces.map((p) => p.name);
@@ -321,7 +321,7 @@ export async function discoverExperiencesByBounds(
 
   const progress = options.onProgress ?? (() => {});
   const providerLabel = aiProvider === 'claude' ? 'Claude' : 'ChatGPT';
-  const modelLabel = options.model || (aiProvider === 'claude' ? 'claude-sonnet-4' : 'gpt-4o');
+  const modelLabel = options.model || (aiProvider === 'claude' ? 'claude-sonnet-4-6' : 'gpt-4o');
 
   // Reverse geocode the bounds center to get meaningful place names for both
   // search queries and the AI prompt (avoids raw GPS coordinates).

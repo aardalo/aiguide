@@ -34,8 +34,8 @@ const OPENAI_MODELS: ModelOption[] = [
 ];
 
 const CLAUDE_MODELS: ModelOption[] = [
-  { id: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4', description: 'Best balance of quality and cost' },
-  { id: 'claude-opus-4-20250514', label: 'Claude Opus 4', description: 'Highest quality, highest cost' },
+  { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', description: 'Best balance of quality and cost' },
+  { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', description: 'Highest quality, highest cost' },
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', description: 'Fast and affordable' },
 ];
 
@@ -43,7 +43,7 @@ export default function AiProviderForm() {
   const [aiProvider, setAiProvider] = useState<AiProviderId>('chatgpt');
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [chatgptModel, setChatgptModel] = useState('gpt-4o');
-  const [claudeModel, setClaudeModel] = useState('claude-sonnet-4-20250514');
+  const [claudeModel, setClaudeModel] = useState('claude-sonnet-4-6');
   const [claudeBatch, setClaudeBatch] = useState(false);
   const [searxngUrl, setSearxngUrl] = useState('');
   const [isLoading, setIsLoading] = useState(true);
@@ -61,7 +61,7 @@ export default function AiProviderForm() {
         for (const row of rows) sm[row.key] = row.value;
         setAiProvider((sm['ai.provider'] as AiProviderId) ?? 'chatgpt');
         setChatgptModel(sm['ai.model.chatgpt'] || 'gpt-4o');
-        setClaudeModel(sm['ai.model.claude'] || 'claude-sonnet-4-20250514');
+        setClaudeModel(sm['ai.model.claude'] || 'claude-sonnet-4-6');
         setClaudeBatch(sm['ai.claude_batch'] === 'true');
         setSearxngUrl(sm['searxng.base_url'] || '');
         setApiKeys(sm);

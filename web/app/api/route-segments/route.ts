@@ -8,6 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/prisma';
 import { getActiveRoutingProvider } from '@/lib/routing';
 import { generateDistanceWaypoints } from '@/lib/routing/waypoints';
@@ -217,7 +218,9 @@ export async function POST(request: NextRequest) {
           encodedPolyline: leg.encodedPolyline ?? null,
         };
 
-        // Find-then-create/update (partial unique indexes don't support Prisma upsert)
+        // Partial unique indexes don't support Prisma upsert, so we use find-then-create/update.
+        // If two requests race and both see no existing segment, the second create will hit the
+        // unique constraint (P2002). Catch that and fall through to an update.
         let segment;
         if (existingSegment) {
           segment = await prisma.routeSegment.update({
@@ -225,15 +228,35 @@ export async function POST(request: NextRequest) {
             data: { ...segData, lastModifiedByDeviceId: deviceId || null },
           });
         } else {
-          segment = await prisma.routeSegment.create({
-            data: {
-              tripId,
-              dayDate: segDayDate,
-              branchId: effectiveBranchId,
-              lastModifiedByDeviceId: deviceId || null,
-              ...segData,
-            },
-          });
+          try {
+            segment = await prisma.routeSegment.create({
+              data: {
+                tripId,
+                dayDate: segDayDate,
+                branchId: effectiveBranchId,
+                lastModifiedByDeviceId: deviceId || null,
+                ...segData,
+              },
+            });
+          } catch (createErr) {
+            if (
+              createErr instanceof Prisma.PrismaClientKnownRequestError &&
+              createErr.code === 'P2002'
+            ) {
+              // Race: another request created the segment between our findFirst and create.
+              // Reload and update so we don't lose the new route data.
+              const raced = await prisma.routeSegment.findFirst({
+                where: { tripId, dayDate: segDayDate, branchId: effectiveBranchId },
+              });
+              if (!raced) throw createErr;
+              segment = await prisma.routeSegment.update({
+                where: { id: raced.id },
+                data: { ...segData, lastModifiedByDeviceId: deviceId || null },
+              });
+            } else {
+              throw createErr;
+            }
+          }
         }
 
         // Regenerate auto waypoints every 50 km along the new polyline (STORY-006).

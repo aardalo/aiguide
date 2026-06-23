@@ -75,6 +75,11 @@ export function useTripsPolling(
   const intervalIdRef = useRef<NodeJS.Timeout | null>(null);
   const backoffRef = useRef<number>(pollingIntervalMs);
   const isPausedRef = useRef<boolean>(false);
+  // Mirror of lastSyncTime read inside performSync. Kept in a ref so performSync
+  // does NOT depend on the lastSyncTime state it updates every poll — depending
+  // on it would recreate performSync each poll, re-run the polling effect, and
+  // trigger an immediate re-poll (a runaway loop firing many requests/second).
+  const lastSyncTimeRef = useRef<string | null>(null);
 
   const performSync = useCallback(async () => {
     if (!tripId || !isPolling || isPausedRef.current) {
@@ -83,7 +88,9 @@ export function useTripsPolling(
 
     try {
       // Use lastSyncTime as 'since' parameter to only get new changes
-      const since = lastSyncTime ? new Date(lastSyncTime).toISOString() : undefined;
+      const since = lastSyncTimeRef.current
+        ? new Date(lastSyncTimeRef.current).toISOString()
+        : undefined;
       const params = new URLSearchParams();
       if (since) params.append('since', since);
 
@@ -100,6 +107,7 @@ export function useTripsPolling(
       const newChanges: ChangeItem[] = data.changes || [];
       const syncTime = data.lastSyncTime;
 
+      lastSyncTimeRef.current = syncTime;
       setLastSyncTime(syncTime);
       setError(null);
 
@@ -119,7 +127,7 @@ export function useTripsPolling(
       // Exponential backoff on error
       backoffRef.current = Math.min(backoffRef.current * BACKOFF_MULTIPLIER, MAX_BACKOFF_MS);
     }
-  }, [tripId, isPolling, lastSyncTime, onChangesDetected, pollingIntervalMs]);
+  }, [tripId, isPolling, onChangesDetected, pollingIntervalMs]);
 
   const pausePolling = useCallback(() => {
     isPausedRef.current = true;
@@ -134,6 +142,7 @@ export function useTripsPolling(
   const resetSync = useCallback(() => {
     setChanges([]);
     setHasChanges(false);
+    lastSyncTimeRef.current = null;
     setLastSyncTime(null);
   }, []);
 

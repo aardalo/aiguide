@@ -58,6 +58,10 @@ is_running() {
 cmd_status() {
   if is_running; then
     echo "running (PID $(cat "$PID_FILE"), Node $("$NODE" --version))"
+  elif systemctl is-active --quiet trip-planner.service 2>/dev/null; then
+    local pid
+    pid=$(systemctl show trip-planner.service --property=MainPID --value 2>/dev/null || echo "?")
+    echo "running via systemd (PID $pid, Node $("$NODE" --version))"
   else
     echo "stopped"
   fi

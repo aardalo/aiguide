@@ -3,30 +3,23 @@
  * Location: app/api/devices/route.ts
  *
  * Endpoints:
- * - GET /api/devices - List all registered devices (most recently seen first)
+ * - GET /api/devices - List devices belonging to the current user
  */
 
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getSessionUser, accessErrorResponse } from "@/lib/auth/access";
 
 /**
  * GET /api/devices
- * List all registered devices, ordered by most recently seen.
- *
- * Response:
- * {
- *   devices: Array<{
- *     id: string
- *     sessionId: string
- *     name: string
- *     lastSeenAt: ISO 8601 datetime
- *     createdAt: ISO 8601 datetime
- *   }>
- * }
+ * List devices registered by the current user, ordered by most recently seen.
  */
 export async function GET() {
   try {
+    const { id: userId } = await getSessionUser();
+
     const devices = await prisma.device.findMany({
+      where: { userId },
       orderBy: { lastSeenAt: "desc" },
     });
 
@@ -34,7 +27,6 @@ export async function GET() {
       {
         devices: devices.map((device) => ({
           id: device.id,
-          sessionId: device.sessionId,
           name: device.name,
           lastSeenAt: device.lastSeenAt.toISOString(),
           createdAt: device.createdAt.toISOString(),
@@ -43,6 +35,8 @@ export async function GET() {
       { status: 200 }
     );
   } catch (error) {
+    const ae = accessErrorResponse(error);
+    if (ae) return ae;
     console.error("[GET /api/devices] Error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
